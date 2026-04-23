@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ETHERSCAN_API_KEY  = os.getenv("ETHERSCAN_API_KEY",  "YOUR_ETHERSCAN_KEY")
 
-MAX_RESULTS = 5
+MAX_RESULTS = 6
 
 # ─── Formatters ──────────────────────────────────────────────────────────────
 
@@ -29,14 +29,19 @@ def fmt_compact(n):
 
 def age_str(ts):
     if not ts: return "Unknown"
-    delta = datetime.now(timezone.utc) - datetime.fromtimestamp(ts, tz=timezone.utc)
-    days  = delta.days
-    years = days // 365;  rem = days % 365
-    months = rem // 30;   rem_days = rem % 30
+    delta   = datetime.now(timezone.utc) - datetime.fromtimestamp(ts, tz=timezone.utc)
+    total_seconds = int(delta.total_seconds())
+    years   = total_seconds // (365 * 24 * 3600); total_seconds %= (365 * 24 * 3600)
+    months  = total_seconds // (30 * 24 * 3600);  total_seconds %= (30 * 24 * 3600)
+    days    = total_seconds // (24 * 3600);        total_seconds %= (24 * 3600)
+    hours   = total_seconds // 3600;               total_seconds %= 3600
+    minutes = total_seconds // 60
     parts = []
-    if years:  parts.append(f"{years}y")
-    if months: parts.append(f"{months}mo")
-    if rem_days or not parts: parts.append(f"{rem_days}d")
+    if years:   parts.append(f"{years}y")
+    if months:  parts.append(f"{months}mo")
+    if days:    parts.append(f"{days}d")
+    if hours:   parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
     return " ".join(parts) + " ago"
 
 # ─── DexScreener ─────────────────────────────────────────────────────────────
