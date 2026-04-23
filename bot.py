@@ -121,13 +121,42 @@ def get_token_info(address: str):
     except:
         return {}
 
+# ─── GeckoTerminal ATH MC ────────────────────────────────────────────────────
+
+def get_ath_mc(pair: dict) -> str:
+    """Fetch ATH price from GeckoTerminal OHLCV and estimate ATH MC."""
+    try:
+        pair_addr  = pair.get("pairAddress", "")
+        current_price = float(pair.get("priceUsd") or 0)
+        fdv           = float(pair.get("fdv") or 0)
+        if not pair_addr or not current_price or not fdv:
+            return "N/A"
+        r = requests.get(
+            f"https://api.geckoterminal.com/api/v2/networks/eth/pools/{pair_addr}/ohlcv/day",
+            params={"limit": 1000, "currency": "usd"},
+            headers={"Accept": "application/json;version=20230302"},
+            timeout=8,
+        )
+        r.raise_for_status()
+        ohlcv = r.json().get("data", {}).get("attributes", {}).get("ohlcv_list", [])
+        if not ohlcv:
+            return "N/A"
+        ath_price = max(entry[2] for entry in ohlcv)  # index 2 = high
+        if ath_price and current_price > 0:
+            ath_mc = (ath_price / current_price) * fdv
+            return fmt_compact(ath_mc)
+        return "N/A"
+    except:
+        return "N/A"
+
 # ─── Core Logic ───────────────────────────────────────────────────────────────
 
 def fetch_token_data(addr: str, pair: dict):
-    """Fetch timestamp + socials in one worker thread per token."""
+    """Fetch timestamp + socials + ATH in one worker thread per token."""
     ts   = get_timestamp(addr, pair.get("pairCreatedAt"))
     info = get_token_info(addr)
-    return addr, pair, ts, info
+    ath  = get_ath_mc(pair)
+    return addr, pair, ts, info, ath
 
 def find_og_tokens_eth(name: str):
     pairs = dexscreener_search(name)
@@ -160,6 +189,7 @@ def find_og_tokens_eth(name: str):
                 results.append(future.result())
             except Exception as e:
                 logger.error(f"Worker error: {e}")
+                
 
     # Sort oldest first
     results.sort(key=lambda x: x[2] if x[2] else float("inf"))
@@ -169,7 +199,7 @@ def find_og_tokens_eth(name: str):
 
 # ─── Message builder ──────────────────────────────────────────────────────────
 
-def build_token_block(pair: dict, ts, info: dict) -> str:
+def build_token_block(pair: dict, ts, info: dict, ath: str = "N/A") -> str:
     base      = pair.get("baseToken", {})
     name      = base.get("name", "Unknown")
     symbol    = base.get("symbol", "?")
@@ -205,7 +235,7 @@ def build_token_block(pair: dict, ts, info: dict) -> str:
     return (
         f"✅ *{name}* ({symbol}) ⏳ {age_str(ts)}  📡\n"
         f"`{addr}`\n\n"
-        f"💰 MC: {fmt_compact(mc)} | 🏦 LP: {lp_str} | 🏷️ {dex}\n"
+        f"💰 MC: {fmt_compact(mc)} | 🚀 ATH MC: {ath} | 🏦 LP: {lp_str} | 🏷️ {dex}\n"
         f"📊 Tx 24h: {txns.get('buys',0)}B/{txns.get('sells',0)}S | "
         f"🔊 Vol: m5 {fmt_compact(vol.get('m5'))} • h1 {fmt_compact(vol.get('h1'))} • "
         f"h6 {fmt_compact(vol.get('h6'))} • h24 {fmt_compact(vol.get('h24'))}\n\n"
@@ -251,7 +281,7 @@ async def eth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         results = data["results"]
         total   = data["total"]
-        blocks  = [build_token_block(pair, ts, info) for _, pair, ts, info in results]
+        blocks  = [build_token_block(pair, ts, info, ath) for _, pair, ts, info, ath in results]
 
         sep      = "\n➖➖➖➖➖➖➖➖➖➖\n"
         footer   = f"\n\n📊 Showing {len(results)}/{total} results"
