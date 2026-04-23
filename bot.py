@@ -273,35 +273,36 @@ def etherscan_get(params: dict):
         return {}
 
 def safe_int(val):
-    """Safely convert to int, return 0 if not numeric."""
     try:
         return int(val)
     except:
         return 0
 
-def get_lp_and_renounce_status(token_addr: str, pair_addr: str) -> tuple:
+def get_lp_and_renounce_status(token_addr: str, pair_addr: str, dex_id: str) -> tuple:
     lp_status = "N/A"
     renounced = None
-
-    if not pair_addr:
-        return lp_status, renounced
 
     dead   = "0x000000000000000000000000000000000000dead"
     zero   = "0x0000000000000000000000000000000000000000"
     locker = "0x663a5c229c09b049e36dce11a52252c36e7e4522"
 
-    dead_bal   = safe_int(etherscan_get({"module":"account","action":"tokenbalance","contractaddress":pair_addr,"address":dead}).get("result"))
-    zero_bal   = safe_int(etherscan_get({"module":"account","action":"tokenbalance","contractaddress":pair_addr,"address":zero}).get("result"))
-    locked_bal = safe_int(etherscan_get({"module":"account","action":"tokenbalance","contractaddress":pair_addr,"address":locker}).get("result"))
-
-    burned_bal = dead_bal + zero_bal
-
-    if burned_bal > 0:
-        lp_status = "burned"
-    elif locked_bal > 0:
-        lp_status = "locked"
-    else:
-        lp_status = "unlocked"
+    # V3 uses NFT positions — no ERC20 LP token to check
+    if "v3" in dex_id.lower():
+        lp_status = "V3 Pool"
+    elif pair_addr:
+        try:
+            dead_bal   = safe_int(etherscan_get({"module":"account","action":"tokenbalance","contractaddress":pair_addr,"address":dead}).get("result"))
+            zero_bal   = safe_int(etherscan_get({"module":"account","action":"tokenbalance","contractaddress":pair_addr,"address":zero}).get("result"))
+            locked_bal = safe_int(etherscan_get({"module":"account","action":"tokenbalance","contractaddress":pair_addr,"address":locker}).get("result"))
+            burned_bal = dead_bal + zero_bal
+            if burned_bal > 0:
+                lp_status = "burned"
+            elif locked_bal > 0:
+                lp_status = "locked"
+            else:
+                lp_status = "unlocked"
+        except Exception as e:
+            logger.error(f"LP check error: {e}")
 
     try:
         result = etherscan_get({
