@@ -149,14 +149,48 @@ def get_ath_mc(pair: dict) -> str:
     except:
         return "N/A"
 
+# ─── Honeypot / Tax ──────────────────────────────────────────────────────────
+
+def get_tax_info(address: str) -> str:
+    """Fetch buy/sell tax and honeypot status from honeypot.is (free, no key)."""
+    try:
+        r = requests.get(
+            f"https://api.honeypot.is/v2/IsHoneypot?address={address}",
+            timeout=6,
+        )
+        r.raise_for_status()
+        data = r.json()
+
+        is_honeypot = data.get("honeypotResult", {}).get("isHoneypot", False)
+        if is_honeypot:
+            return "🚨 HONEYPOT"
+
+        sim = data.get("simulationResult", {})
+        buy_tax  = sim.get("buyTax")
+        sell_tax = sim.get("sellTax")
+
+        if buy_tax is None and sell_tax is None:
+            return "Tax: N/A"
+
+        buy_str  = f"{buy_tax:.1f}%"  if buy_tax  is not None else "N/A"
+        sell_str = f"{sell_tax:.1f}%" if sell_tax is not None else "N/A"
+
+        buy_emoji  = "🟢" if (buy_tax  or 0) <= 5 else "🟡" if (buy_tax  or 0) <= 10 else "🔴"
+        sell_emoji = "🟢" if (sell_tax or 0) <= 5 else "🟡" if (sell_tax or 0) <= 10 else "🔴"
+
+        return f"{buy_emoji} Buy: {buy_str} | {sell_emoji} Sell: {sell_str}"
+    except:
+        return "Tax: N/A"
+
 # ─── Core Logic ───────────────────────────────────────────────────────────────
 
 def fetch_token_data(addr: str, pair: dict):
-    """Fetch timestamp + socials + ATH in one worker thread per token."""
+    """Fetch timestamp + socials + ATH + tax in one worker thread per token."""
     ts   = get_timestamp(addr, pair.get("pairCreatedAt"))
     info = get_token_info(addr)
     ath  = get_ath_mc(pair)
-    return addr, pair, ts, info, ath
+    tax  = get_tax_info(addr)
+    return addr, pair, ts, info, ath, tax
 
 def find_og_tokens_eth(name: str):
     pairs = dexscreener_search(name)
@@ -199,7 +233,7 @@ def find_og_tokens_eth(name: str):
 
 # ─── Message builder ──────────────────────────────────────────────────────────
 
-def build_token_block(pair: dict, ts, info: dict, ath: str = "N/A") -> str:
+def build_token_block(pair: dict, ts, info: dict, ath: str = "N/A", tax: str = "Tax: N/A") -> str:
     base      = pair.get("baseToken", {})
     name      = base.get("name", "Unknown")
     symbol    = base.get("symbol", "?")
@@ -236,9 +270,8 @@ def build_token_block(pair: dict, ts, info: dict, ath: str = "N/A") -> str:
         f"✅ *{name}* ({symbol}) ⏳ {age_str(ts)}  📡\n"
         f"`{addr}`\n\n"
         f"💰 MC: {fmt_compact(mc)} | 🚀 ATH MC: {ath} | 🏦 LP: {lp_str} | 🏷️ {dex}\n"
-        f"📊 Tx 24h: {txns.get('buys',0)}B/{txns.get('sells',0)}S | "
-        f"🔊 Vol: m5 {fmt_compact(vol.get('m5'))} • h1 {fmt_compact(vol.get('h1'))} • "
-        f"h6 {fmt_compact(vol.get('h6'))} • h24 {fmt_compact(vol.get('h24'))}\n\n"
+        f"📊 Tx 24h: {txns.get('buys',0)}B/{txns.get('sells',0)}S | 🔊 Vol 5m: {fmt_compact(vol.get('m5'))}\n"
+        f"💸 Tax: {tax}\n\n"
         f"Socials: {socials_line}\n\n"
         f"🔗 [DexT](https://www.dextools.io/app/en/ether/pair-explorer/{pair_addr}) • "
         f"[DexS](https://dexscreener.com/ethereum/{pair_addr}) • "
@@ -281,7 +314,7 @@ async def eth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         results = data["results"]
         total   = data["total"]
-        blocks  = [build_token_block(pair, ts, info, ath) for _, pair, ts, info, ath in results]
+        blocks  = [build_token_block(pair, ts, info, ath, tax) for _, pair, ts, info, ath, tax in results]
 
         sep      = "\n➖➖➖➖➖➖➖➖➖➖\n"
         footer   = f"\n\n📊 Showing {len(results)}/{total} results"
