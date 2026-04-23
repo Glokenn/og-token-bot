@@ -14,9 +14,18 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ETHERSCAN_API_KEY  = os.getenv("ETHERSCAN_API_KEY",  "YOUR_ETHERSCAN_KEY")
 
-MAX_RESULTS = 6
+MAX_RESULTS = 5
 OWNER_ID    = 7525750969
 whitelist   = set()
+
+DEAD_ADDRESSES = {"0x000000000000000000000000000000000000dead", "0x0000000000000000000000000000000000000000"}
+LOCKERS = {
+    "0x663a5c229c09b049e36dcc11a9b0d4a8eb9db214",  # Unicrypt v2
+    "0xdba68f07d1b7ca219f78ae8582c213d975c25caf",  # Unicrypt v3
+    "0xe2fe530c047f2d85298b07d9333c05737f1435fb",  # Team.Finance
+    "0x407993575c91ce7643a4d4ccacc9a98c36ee1bbe",  # PinkLock
+    "0x71b5759d73262fbb223956913ecf4ecc51057641",  # Pinksale
+}
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
 
@@ -44,10 +53,10 @@ def age_str(ts):
     hours   = total_seconds // 3600;               total_seconds %= 3600
     minutes = total_seconds // 60
     parts = []
-    if years:   parts.append(f"{years}y")
-    if months:  parts.append(f"{months}mo")
-    if days:    parts.append(f"{days}d")
-    if hours:   parts.append(f"{hours}h")
+    if years:  parts.append(f"{years}y")
+    if months: parts.append(f"{months}mo")
+    if days:   parts.append(f"{days}d")
+    if hours:  parts.append(f"{hours}h")
     parts.append(f"{minutes}m")
     return " ".join(parts) + " ago"
 
@@ -109,6 +118,81 @@ def get_timestamp(addr: str, pair_created_at_ms):
         return int(pair_created_at_ms) // 1000
     return get_creation_timestamp_etherscan(addr)
 
+# ─── CA Renounced ─────────────────────────────────────────────────────────────
+
+def get_ca_renounced(address: str) -> str:
+    try:
+        r = requests.get("https://api.etherscan.io/api", params={
+            "module":"contract","action":"getcontractcreation",
+            "contractaddresses": address,"apikey": ETHERSCAN_API_KEY,
+        }, timeout=8)
+        data = r.json()
+        if data.get("status") != "1" or not data.get("result"): return "N/A"
+        # Check owner via proxy call
+        # Use eth_call to read owner() function — selector 0x8da5cb5b
+        r2 = requests.get("https://api.etherscan.io/api", params={
+            "module":"proxy","action":"eth_call",
+            "to": address,
+            "data": "0x8da5cb5b",
+            "tag": "latest",
+            "apikey": ETHERSCAN_API_KEY,
+        }, timeout=8)
+        result = r2.json().get("result","")
+        if not result or result == "0x": return "N/A"
+        owner = "0x" + result[-40:].lower()
+        if owner in DEAD_ADDRESSES:
+            return "✅ Renounced"
+        return "❌ Not Renounced"
+    except:
+        return "N/A"
+
+# ─── LP Locked / Burned ───────────────────────────────────────────────────────
+
+def get_lp_status(pair_address: str) -> str:
+    try:
+        # Get top holders of the LP token
+        r = requests.get("https://api.etherscan.io/api", params={
+            "module":"token","action":"tokenholderlist",
+            "contractaddress": pair_address,
+            "page": 1,"offset": 10,
+            "apikey": ETHERSCAN_API_KEY,
+        }, timeout=8)
+        data = r.json()
+        if data.get("status") != "1" or not data.get("result"): return "N/A"
+
+        holders = data["result"]
+        total_supply_r = requests.get("https://api.etherscan.io/api", params={
+            "module":"stats","action":"tokensupply",
+            "contractaddress": pair_address,
+            "apikey": ETHERSCAN_API_KEY,
+        }, timeout=8)
+        total_supply = int(total_supply_r.json().get("result", 0) or 0)
+        if not total_supply: return "N/A"
+
+        burned_pct = 0.0
+        locked_pct = 0.0
+
+        for h in holders:
+            addr    = h.get("TokenHolderAddress","").lower()
+            balance = int(h.get("TokenHolderQuantity", 0) or 0)
+            pct     = (balance / total_supply) * 100
+
+            if addr in DEAD_ADDRESSES:
+                burned_pct += pct
+            elif addr in LOCKERS:
+                locked_pct += pct
+
+        parts = []
+        if burned_pct >= 1:
+            parts.append(f"🔥 Burned {burned_pct:.1f}%")
+        if locked_pct >= 1:
+            parts.append(f"🔒 Locked {locked_pct:.1f}%")
+        if not parts:
+            return "⚠️ Not Locked/Burned"
+        return " | ".join(parts)
+    except:
+        return "N/A"
+
 # ─── Socials ──────────────────────────────────────────────────────────────────
 
 def get_token_info(address: str):
@@ -165,14 +249,91 @@ def get_tax_info(address: str) -> str:
     except:
         return "N/A"
 
+# ─── LP Locked / Burned / CA Renounced ───────────────────────────────────────
+
+LOCKER_ADDRESSES = {
+    "0x663a5c229c09b049e36dce11a52252c36e7e4522",  # Unicrypt V2
+    "0xdba68f07d1b7ca219f78ae8582c213d975c25ca7",  # Unicrypt V3
+    "0xe2fe530c047f2d85298b07d9333c05737f1435fb",  # Team.Finance
+    "0xc77aab3c6d7dab46248f3cc3033c856171878bd5",  # Mudra
+    "0x71b5759d73262fbb223956913ecf4ecc51057641",  # Pinksale
+}
+DEAD_ADDRESSES = {
+    "0x000000000000000000000000000000000000dead",
+    "0x0000000000000000000000000000000000000000",
+}
+
+def get_lp_and_renounce_status(token_addr: str, pair_addr: str) -> tuple:
+    """
+    Returns (lp_status, renounced)
+    lp_status: 'burned' | 'locked' | 'unlocked' | 'N/A'
+    renounced: True | False | None
+    """
+    lp_status = "N/A"
+    renounced = None
+
+    try:
+        # Check top LP token holders (pair address = LP token address on Uniswap V2)
+        r = requests.get("https://api.etherscan.io/api", params={
+            "module": "token",
+            "action": "tokenholderlist",
+            "contractaddress": pair_addr,
+            "page": 1,
+            "offset": 10,
+            "apikey": ETHERSCAN_API_KEY,
+        }, timeout=8)
+        holders = r.json().get("result") or []
+        if isinstance(holders, list):
+            for h in holders:
+                addr = (h.get("TokenHolderAddress") or "").lower()
+                if addr in DEAD_ADDRESSES:
+                    lp_status = "burned"
+                    break
+                if addr in LOCKER_ADDRESSES:
+                    lp_status = "locked"
+                    break
+            else:
+                if holders:
+                    lp_status = "unlocked"
+    except Exception as e:
+        logger.error(f"LP check error: {e}")
+
+    try:
+        # Check contract owner (renounced = owner is dead/zero address)
+        r2 = requests.get("https://api.etherscan.io/api", params={
+            "module": "contract",
+            "action": "getabi",
+            "address": token_addr,
+            "apikey": ETHERSCAN_API_KEY,
+        }, timeout=8)
+        # Use proxy call to read owner()
+        r3 = requests.get("https://api.etherscan.io/api", params={
+            "module": "proxy",
+            "action": "eth_call",
+            "to": token_addr,
+            "data": "0x8da5cb5b",  # owner() selector
+            "tag": "latest",
+            "apikey": ETHERSCAN_API_KEY,
+        }, timeout=8)
+        result = r3.json().get("result", "")
+        if result and result != "0x":
+            owner = "0x" + result[-40:]
+            renounced = owner.lower() in DEAD_ADDRESSES
+    except Exception as e:
+        logger.error(f"Renounce check error: {e}")
+
+    return lp_status, renounced
+
 # ─── Core Logic ───────────────────────────────────────────────────────────────
 
 def fetch_token_data(addr: str, pair: dict):
-    ts   = get_timestamp(addr, pair.get("pairCreatedAt"))
-    info = get_token_info(addr)
-    ath  = get_ath_mc(pair)
-    tax  = get_tax_info(addr)
-    return addr, pair, ts, info, ath, tax
+    ts        = get_timestamp(addr, pair.get("pairCreatedAt"))
+    info      = get_token_info(addr)
+    ath       = get_ath_mc(pair)
+    tax       = get_tax_info(addr)
+    renounced = get_ca_renounced(addr)
+    lp_status = get_lp_status(pair.get("pairAddress", ""))
+    return addr, pair, ts, info, ath, tax, renounced, lp_status
 
 def find_og_tokens_eth(name: str):
     pairs = dexscreener_search(name)
@@ -207,7 +368,7 @@ def find_og_tokens_eth(name: str):
 
 # ─── Message Builder ──────────────────────────────────────────────────────────
 
-def build_token_block(pair: dict, ts, info: dict, ath: str = "N/A", tax: str = "N/A") -> str:
+def build_token_block(pair, ts, info, ath, tax, renounced, lp_status) -> str:
     base      = pair.get("baseToken", {})
     name      = base.get("name", "Unknown")
     symbol    = base.get("symbol", "?")
@@ -245,7 +406,8 @@ def build_token_block(pair: dict, ts, info: dict, ath: str = "N/A", tax: str = "
         f"`{addr}`\n\n"
         f"💰 MC: {fmt_compact(mc)} | 🚀 ATH MC: {ath} | 🏦 LP: {lp_str} | 🏷️ {dex}\n"
         f"📊 Tx 24h: {txns.get('buys',0)}B/{txns.get('sells',0)}S | 🔊 Vol 5m: {fmt_compact(vol.get('m5'))}\n"
-        f"{honeypot_line}\n\n"
+        f"{honeypot_line}\n"
+        f"🔐 CA: {renounced} | 💧 LP: {lp_status}\n\n"
         f"Socials: {socials_line}\n\n"
         f"🔗 [DexT](https://www.dextools.io/app/en/ether/pair-explorer/{pair_addr}) • "
         f"[DexS](https://dexscreener.com/ethereum/{pair_addr}) • "
@@ -286,9 +448,10 @@ async def eth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         results = data["results"]
         total   = data["total"]
-        blocks  = [build_token_block(pair, ts, info, ath, tax) for _, pair, ts, info, ath, tax in results]
-        sep     = "\n➖➖➖➖➖➖➖➖➖➖\n"
-        footer  = f"\n\n📊 Showing {len(results)}/{total} results"
+        blocks  = [build_token_block(pair, ts, info, ath, tax, renounced, lp_status)
+                   for _, pair, ts, info, ath, tax, renounced, lp_status in results]
+        sep    = "\n➖➖➖➖➖➖➖➖➖➖\n"
+        footer = f"\n\n📊 Showing {len(results)}/{total} results"
         await loading.edit_text(sep.join(blocks) + footer, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
     except Exception as e:
         logger.error(f"eth_command error: {e}")
