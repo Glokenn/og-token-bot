@@ -16,6 +16,9 @@ ETHERSCAN_API_KEY  = os.getenv("ETHERSCAN_API_KEY",  "YOUR_ETHERSCAN_KEY")
 
 MAX_RESULTS = 6
 
+OWNER_ID = 7525750969
+whitelist = set()  # stores allowed user IDs
+
 # ─── Formatters ──────────────────────────────────────────────────────────────
 
 def fmt_compact(n):
@@ -294,6 +297,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def eth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        await update.message.reply_text("⛔ You are not authorized.\nContact the admin @glokenn to get access.")
+        return
     if not context.args:
         await update.message.reply_text("⚠️ Usage: `/eth <token name>`\nExample: `/eth pepe`", parse_mode=ParseMode.MARKDOWN)
         return
@@ -336,8 +342,11 @@ def main():
     if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         raise ValueError("Set TELEGRAM_BOT_TOKEN environment variable!")
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("eth",   eth_command))
+    app.add_handler(CommandHandler("start",  start))
+    app.add_handler(CommandHandler("eth",    eth_command))
+    app.add_handler(CommandHandler("allow",  allow_user))
+    app.add_handler(CommandHandler("remove", remove_user))
+    app.add_handler(CommandHandler("users",  list_users))
     logger.info("🚀 OG Token Bot running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
