@@ -263,77 +263,65 @@ DEAD_ADDRESSES = {
     "0x0000000000000000000000000000000000000000",
 }
 
+def etherscan_get(params: dict):
+    """Single Etherscan call with error handling."""
+    try:
+        params["apikey"] = ETHERSCAN_API_KEY
+        r = requests.get("https://api.etherscan.io/api", params=params, timeout=8)
+        return r.json()
+    except:
+        return {}
+
 def get_lp_and_renounce_status(token_addr: str, pair_addr: str) -> tuple:
-    """
-    Returns (lp_status, renounced)
-    lp_status: 'burned' | 'locked' | 'unlocked' | 'N/A'
-    renounced: True | False | None
-    """
     lp_status = "N/A"
     renounced = None
 
     try:
-        # Check balance of dead address and known lockers using tokenbalance (free)
-        total_supply_r = requests.get("https://api.etherscan.io/api", params={
-            "module": "stats",
-            "action": "tokensupply",
-            "contractaddress": pair_addr,
-            "apikey": ETHERSCAN_API_KEY,
-        }, timeout=8)
-        total_supply = int(total_supply_r.json().get("result") or 0)
+        # Check dead address LP balance
+        dead = "0x000000000000000000000000000000000000dead"
+        zero = "0x0000000000000000000000000000000000000000"
 
-        burned = 0
-        locked = 0
+        dead_bal = int(etherscan_get({
+            "module": "account", "action": "tokenbalance",
+            "contractaddress": pair_addr, "address": dead,
+        }).get("result") or 0)
 
-        # Check dead address balance
-        for dead in list(DEAD_ADDRESSES)[:2]:
-            r = requests.get("https://api.etherscan.io/api", params={
-                "module": "account",
-                "action": "tokenbalance",
-                "contractaddress": pair_addr,
-                "address": dead,
-                "apikey": ETHERSCAN_API_KEY,
-            }, timeout=6)
-            burned += int(r.json().get("result") or 0)
+        zero_bal = int(etherscan_get({
+            "module": "account", "action": "tokenbalance",
+            "contractaddress": pair_addr, "address": zero,
+        }).get("result") or 0)
 
-        # Check locker balances
-        for locker in list(LOCKER_ADDRESSES)[:3]:
-            r = requests.get("https://api.etherscan.io/api", params={
-                "module": "account",
-                "action": "tokenbalance",
-                "contractaddress": pair_addr,
-                "address": locker,
-                "apikey": ETHERSCAN_API_KEY,
-            }, timeout=6)
-            locked += int(r.json().get("result") or 0)
+        burned_bal = dead_bal + zero_bal
 
-        if total_supply > 0:
-            burned_pct = burned / total_supply
-            locked_pct = locked / total_supply
-            if burned_pct > 0.5:
-                lp_status = "burned"
-            elif locked_pct > 0.5:
-                lp_status = "locked"
-            else:
-                lp_status = "unlocked"
+        # Check one main locker (Unicrypt)
+        locker = "0x663a5c229c09b049e36dce11a52252c36e7e4522"
+        locked_bal = int(etherscan_get({
+            "module": "account", "action": "tokenbalance",
+            "contractaddress": pair_addr, "address": locker,
+        }).get("result") or 0)
+
+        if burned_bal > 0:
+            lp_status = "burned"
+        elif locked_bal > 0:
+            lp_status = "locked"
+        else:
+            lp_status = "unlocked"
 
     except Exception as e:
         logger.error(f"LP check error: {e}")
 
     try:
-        # Check CA renounced via eth_call owner()
-        r3 = requests.get("https://api.etherscan.io/api", params={
-            "module": "proxy",
-            "action": "eth_call",
-            "to": token_addr,
-            "data": "0x8da5cb5b",
-            "tag": "latest",
-            "apikey": ETHERSCAN_API_KEY,
-        }, timeout=8)
-        result = r3.json().get("result", "")
+        # Check CA renounced via owner() call
+        result = etherscan_get({
+            "module": "proxy", "action": "eth_call",
+            "to": token_addr, "data": "0x8da5cb5b", "tag": "latest",
+        }).get("result", "")
         if result and result != "0x" and len(result) >= 42:
             owner = "0x" + result[-40:]
-            renounced = owner.lower() in DEAD_ADDRESSES
+            renounced = owner.lower() in {
+                "0x000000000000000000000000000000000000dead",
+                "0x0000000000000000000000000000000000000000",
+            }
     except Exception as e:
         logger.error(f"Renounce check error: {e}")
 
