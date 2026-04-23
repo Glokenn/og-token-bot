@@ -272,56 +272,45 @@ def etherscan_get(params: dict):
     except:
         return {}
 
+def safe_int(val):
+    """Safely convert to int, return 0 if not numeric."""
+    try:
+        return int(val)
+    except:
+        return 0
+
 def get_lp_and_renounce_status(token_addr: str, pair_addr: str) -> tuple:
     lp_status = "N/A"
     renounced = None
 
-    try:
-        # Check dead address LP balance
-        dead = "0x000000000000000000000000000000000000dead"
-        zero = "0x0000000000000000000000000000000000000000"
+    if not pair_addr:
+        return lp_status, renounced
 
-        dead_bal = int(etherscan_get({
-            "module": "account", "action": "tokenbalance",
-            "contractaddress": pair_addr, "address": dead,
-        }).get("result") or 0)
+    dead   = "0x000000000000000000000000000000000000dead"
+    zero   = "0x0000000000000000000000000000000000000000"
+    locker = "0x663a5c229c09b049e36dce11a52252c36e7e4522"
 
-        zero_bal = int(etherscan_get({
-            "module": "account", "action": "tokenbalance",
-            "contractaddress": pair_addr, "address": zero,
-        }).get("result") or 0)
+    dead_bal   = safe_int(etherscan_get({"module":"account","action":"tokenbalance","contractaddress":pair_addr,"address":dead}).get("result"))
+    zero_bal   = safe_int(etherscan_get({"module":"account","action":"tokenbalance","contractaddress":pair_addr,"address":zero}).get("result"))
+    locked_bal = safe_int(etherscan_get({"module":"account","action":"tokenbalance","contractaddress":pair_addr,"address":locker}).get("result"))
 
-        burned_bal = dead_bal + zero_bal
+    burned_bal = dead_bal + zero_bal
 
-        # Check one main locker (Unicrypt)
-        locker = "0x663a5c229c09b049e36dce11a52252c36e7e4522"
-        locked_bal = int(etherscan_get({
-            "module": "account", "action": "tokenbalance",
-            "contractaddress": pair_addr, "address": locker,
-        }).get("result") or 0)
-
-        if burned_bal > 0:
-            lp_status = "burned"
-        elif locked_bal > 0:
-            lp_status = "locked"
-        else:
-            lp_status = "unlocked"
-
-    except Exception as e:
-        logger.error(f"LP check error: {e}")
+    if burned_bal > 0:
+        lp_status = "burned"
+    elif locked_bal > 0:
+        lp_status = "locked"
+    else:
+        lp_status = "unlocked"
 
     try:
-        # Check CA renounced via owner() call
         result = etherscan_get({
-            "module": "proxy", "action": "eth_call",
-            "to": token_addr, "data": "0x8da5cb5b", "tag": "latest",
-        }).get("result", "")
+            "module":"proxy","action":"eth_call",
+            "to":token_addr,"data":"0x8da5cb5b","tag":"latest",
+        }).get("result","")
         if result and result != "0x" and len(result) >= 42:
             owner = "0x" + result[-40:]
-            renounced = owner.lower() in {
-                "0x000000000000000000000000000000000000dead",
-                "0x0000000000000000000000000000000000000000",
-            }
+            renounced = owner.lower() in {dead, zero}
     except Exception as e:
         logger.error(f"Renounce check error: {e}")
 
