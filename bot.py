@@ -273,50 +273,65 @@ def get_lp_and_renounce_status(token_addr: str, pair_addr: str) -> tuple:
     renounced = None
 
     try:
-        # Check top LP token holders (pair address = LP token address on Uniswap V2)
-        r = requests.get("https://api.etherscan.io/api", params={
-            "module": "token",
-            "action": "tokenholderlist",
+        # Check balance of dead address and known lockers using tokenbalance (free)
+        total_supply_r = requests.get("https://api.etherscan.io/api", params={
+            "module": "stats",
+            "action": "tokensupply",
             "contractaddress": pair_addr,
-            "page": 1,
-            "offset": 10,
             "apikey": ETHERSCAN_API_KEY,
         }, timeout=8)
-        holders = r.json().get("result") or []
-        if isinstance(holders, list):
-            for h in holders:
-                addr = (h.get("TokenHolderAddress") or "").lower()
-                if addr in DEAD_ADDRESSES:
-                    lp_status = "burned"
-                    break
-                if addr in LOCKER_ADDRESSES:
-                    lp_status = "locked"
-                    break
+        total_supply = int(total_supply_r.json().get("result") or 0)
+
+        burned = 0
+        locked = 0
+
+        # Check dead address balance
+        for dead in list(DEAD_ADDRESSES)[:2]:
+            r = requests.get("https://api.etherscan.io/api", params={
+                "module": "account",
+                "action": "tokenbalance",
+                "contractaddress": pair_addr,
+                "address": dead,
+                "apikey": ETHERSCAN_API_KEY,
+            }, timeout=6)
+            burned += int(r.json().get("result") or 0)
+
+        # Check locker balances
+        for locker in list(LOCKER_ADDRESSES)[:3]:
+            r = requests.get("https://api.etherscan.io/api", params={
+                "module": "account",
+                "action": "tokenbalance",
+                "contractaddress": pair_addr,
+                "address": locker,
+                "apikey": ETHERSCAN_API_KEY,
+            }, timeout=6)
+            locked += int(r.json().get("result") or 0)
+
+        if total_supply > 0:
+            burned_pct = burned / total_supply
+            locked_pct = locked / total_supply
+            if burned_pct > 0.5:
+                lp_status = "burned"
+            elif locked_pct > 0.5:
+                lp_status = "locked"
             else:
-                if holders:
-                    lp_status = "unlocked"
+                lp_status = "unlocked"
+
     except Exception as e:
         logger.error(f"LP check error: {e}")
 
     try:
-        # Check contract owner (renounced = owner is dead/zero address)
-        r2 = requests.get("https://api.etherscan.io/api", params={
-            "module": "contract",
-            "action": "getabi",
-            "address": token_addr,
-            "apikey": ETHERSCAN_API_KEY,
-        }, timeout=8)
-        # Use proxy call to read owner()
+        # Check CA renounced via eth_call owner()
         r3 = requests.get("https://api.etherscan.io/api", params={
             "module": "proxy",
             "action": "eth_call",
             "to": token_addr,
-            "data": "0x8da5cb5b",  # owner() selector
+            "data": "0x8da5cb5b",
             "tag": "latest",
             "apikey": ETHERSCAN_API_KEY,
         }, timeout=8)
         result = r3.json().get("result", "")
-        if result and result != "0x":
+        if result and result != "0x" and len(result) >= 42:
             owner = "0x" + result[-40:]
             renounced = owner.lower() in DEAD_ADDRESSES
     except Exception as e:
