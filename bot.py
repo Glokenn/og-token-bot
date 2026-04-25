@@ -208,54 +208,73 @@ def get_ath_mc(pair: dict) -> str:
     except:
         return "N/A"
 
-# ─── Tax ──────────────────────────────────────────────────────────────────────
+# ─── Tax + LP from honeypot.is ───────────────────────────────────────────────
 
-def get_tax_info(address: str) -> str:
+def get_tax_and_lp(address: str, dex_id: str) -> tuple:
+    """Returns (tax_str, lp_str) from a single honeypot.is call."""
+    dex = dex_id.lower()
+
+    # V3/V4 pools have no burnable LP
+    if "v4" in dex:
+        lp_status = "🔵 V4 Pool"
+    elif "v3" in dex:
+        lp_status = "🟣 V3 Pool"
+    else:
+        lp_status = "N/A"
+
+    tax_str = "N/A"
     try:
         r = requests.get(f"https://api.honeypot.is/v2/IsHoneypot?address={address}", timeout=6)
         r.raise_for_status()
         data = r.json()
-        if data.get("honeypotResult",{}).get("isHoneypot",False): return "HONEYPOT"
-        sim      = data.get("simulationResult",{})
-        buy_tax  = sim.get("buyTax")
-        sell_tax = sim.get("sellTax")
-        if buy_tax is None and sell_tax is None: return "N/A"
-        buy_str  = f"{buy_tax:.1f}%"  if buy_tax  is not None else "N/A"
-        sell_str = f"{sell_tax:.1f}%" if sell_tax is not None else "N/A"
-        buy_e    = "🟢" if (buy_tax  or 0) <= 5 else "🟡" if (buy_tax  or 0) <= 10 else "🔴"
-        sell_e   = "🟢" if (sell_tax or 0) <= 5 else "🟡" if (sell_tax or 0) <= 10 else "🔴"
-        return f"{buy_e} Buy: {buy_str} | {sell_e} Sell: {sell_str}"
-    except:
-        return "N/A"
 
-# ─── LP Burn Check ───────────────────────────────────────────────────────────
+        # Tax
+        if data.get("honeypotResult",{}).get("isHoneypot", False):
+            tax_str = "HONEYPOT"
+        else:
+            sim      = data.get("simulationResult", {})
+            buy_tax  = sim.get("buyTax")
+            sell_tax = sim.get("sellTax")
+            if buy_tax is not None or sell_tax is not None:
+                buy_str  = f"{buy_tax:.1f}%"  if buy_tax  is not None else "N/A"
+                sell_str = f"{sell_tax:.1f}%" if sell_tax is not None else "N/A"
+                buy_e    = "🟢" if (buy_tax  or 0) <= 5 else "🟡" if (buy_tax  or 0) <= 10 else "🔴"
+                sell_e   = "🟢" if (sell_tax or 0) <= 5 else "🟡" if (sell_tax or 0) <= 10 else "🔴"
+                tax_str  = f"{buy_e} Buy: {buy_str} | {sell_e} Sell: {sell_str}"
 
-def get_lp_burn(pair_addr: str, dex_id: str) -> str:
-    dex = dex_id.lower()
-    if "v4" in dex: return "🔵 V4 Pool"
-    if "v3" in dex: return "🟣 V3 Pool"
-    if not pair_addr: return "N/A"
-    try:
-        dead = "0x000000000000000000000000000000000000dead"
-        r = requests.get("https://api.etherscan.io/api", params={
-            "module": "account", "action": "tokenbalance",
-            "contractaddress": pair_addr,
-            "address": dead,
-            "apikey": ETHERSCAN_API_KEY,
-        }, timeout=6)
-        bal = int(r.json().get("result") or 0)
-        return "🔥 Burned" if bal > 0 else "❌ Not Burned"
-    except:
-        return "N/A"
+        # LP lock/burn from honeypot.is pair data
+        if lp_status == "N/A":
+            pair_data = data.get("pair", {})
+            locks     = pair_data.get("liquidity", {}) if isinstance(pair_data.get("liquidity"), dict) else {}
+            lp_locks  = data.get("lpHolders") or []
+            burned    = any(
+                (h.get("address","").lower() in {
+                    "0x000000000000000000000000000000000000dead",
+                    "0x0000000000000000000000000000000000000000"
+                }) for h in lp_locks
+            )
+            locked = any(h.get("isLocked", False) for h in lp_locks)
+            if burned:
+                lp_status = "🔥 Burned"
+            elif locked:
+                lp_status = "🔒 Locked"
+            elif lp_locks:
+                lp_status = "🔓 Not Burned"
+            else:
+                lp_status = "N/A"
+
+    except Exception as e:
+        logger.error(f"honeypot.is {address}: {e}")
+
+    return tax_str, lp_status
 
 # ─── Core Logic ───────────────────────────────────────────────────────────────
 
 def fetch_token_data(addr: str, pair: dict):
-    ts       = get_timestamp(addr, pair.get("pairCreatedAt"))
-    info     = get_token_info(addr)
-    ath      = get_ath_mc(pair)
-    tax      = get_tax_info(addr)
-    lp_burn  = get_lp_burn(pair.get("pairAddress",""), pair.get("dexId",""))
+    ts          = get_timestamp(addr, pair.get("pairCreatedAt"))
+    info        = get_token_info(addr)
+    ath         = get_ath_mc(pair)
+    tax, lp_burn = get_tax_and_lp(addr, pair.get("dexId",""))
     return addr, pair, ts, info, ath, tax, lp_burn
 
 def find_og_tokens_eth(name: str):
