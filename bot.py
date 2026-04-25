@@ -18,6 +18,11 @@ MAX_RESULTS = 5
 OWNER_ID    = 7525750969
 whitelist   = set()
 
+DEAD_ADDRS = {
+    "0x000000000000000000000000000000000000dead",
+    "0x0000000000000000000000000000000000000000",
+}
+
 # ─── Auth ─────────────────────────────────────────────────────────────────────
 
 def is_allowed(user_id: int) -> bool:
@@ -38,10 +43,10 @@ def age_str(ts):
     if not ts: return "Unknown"
     delta         = datetime.now(timezone.utc) - datetime.fromtimestamp(ts, tz=timezone.utc)
     total_seconds = int(delta.total_seconds())
-    years   = total_seconds // (365 * 24 * 3600); total_seconds %= (365 * 24 * 3600)
-    months  = total_seconds // (30 * 24 * 3600);  total_seconds %= (30 * 24 * 3600)
-    days    = total_seconds // (24 * 3600);        total_seconds %= (24 * 3600)
-    hours   = total_seconds // 3600;               total_seconds %= 3600
+    years   = total_seconds // (365*24*3600); total_seconds %= (365*24*3600)
+    months  = total_seconds // (30*24*3600);  total_seconds %= (30*24*3600)
+    days    = total_seconds // (24*3600);     total_seconds %= (24*3600)
+    hours   = total_seconds // 3600;          total_seconds %= 3600
     minutes = total_seconds // 60
     parts = []
     if years:   parts.append(f"{years}y")
@@ -83,13 +88,13 @@ def geckoterminal_search(name: str):
         )
         r.raise_for_status()
         pools = r.json().get("data") or []
-        nl      = name.lower().strip()
+        nl = name.lower().strip()
         results = []
         for pool in pools:
-            attrs      = pool.get("attributes", {})
-            sym        = attrs.get("base_token_symbol", "").lower()
-            pool_name  = attrs.get("name", "").lower()
-            liq_usd    = float(attrs.get("reserve_in_usd") or 0)
+            attrs     = pool.get("attributes", {})
+            sym       = attrs.get("base_token_symbol", "").lower()
+            pool_name = attrs.get("name", "").lower()
+            liq_usd   = float(attrs.get("reserve_in_usd") or 0)
             if liq_usd < 500: continue
             if sym != nl and pool_name.split(" / ")[0].strip() != nl: continue
             token_addr = (pool.get("relationships", {})
@@ -97,8 +102,8 @@ def geckoterminal_search(name: str):
                              .get("data", {})
                              .get("id", "")
                              .replace("eth_", ""))
-            pool_addr  = attrs.get("address", "")
-            vol        = attrs.get("volume_usd", {}) or {}
+            pool_addr = attrs.get("address", "")
+            vol = attrs.get("volume_usd", {}) or {}
             results.append({
                 "chainId":       "ethereum",
                 "pairAddress":   pool_addr,
@@ -122,44 +127,37 @@ def geckoterminal_search(name: str):
 
 def get_creation_timestamp(address: str):
     try:
-        # Method 1: getcontractcreation
         r = requests.get("https://api.etherscan.io/api", params={
             "module":"contract","action":"getcontractcreation",
             "contractaddresses": address,"apikey": ETHERSCAN_API_KEY,
         }, timeout=8)
         data = r.json()
-        bn  = None
+        bn = None
         if data.get("status") == "1" and data.get("result"):
             res = data["result"][0]
             bn  = res.get("blockNumber")
             if not bn:
                 txh = res.get("txHash")
                 if txh:
-                    r2  = requests.get("https://api.etherscan.io/api", params={
+                    r2 = requests.get("https://api.etherscan.io/api", params={
                         "module":"proxy","action":"eth_getTransactionByHash",
                         "txhash": txh,"apikey": ETHERSCAN_API_KEY,
                     }, timeout=8)
                     bn = int(r2.json().get("result",{}).get("blockNumber","0x0"), 16)
             else:
                 bn = int(bn)
-
-        # Method 2: fallback — get first tx from account tx list
         if not bn:
             r3 = requests.get("https://api.etherscan.io/api", params={
                 "module":"account","action":"txlist",
                 "address": address,"startblock":0,"endblock":99999999,
-                "page":1,"offset":1,"sort":"asc",
-                "apikey": ETHERSCAN_API_KEY,
+                "page":1,"offset":1,"sort":"asc","apikey": ETHERSCAN_API_KEY,
             }, timeout=8)
             txs = r3.json().get("result") or []
             if isinstance(txs, list) and txs:
-                bn = int(txs[0].get("blockNumber", 0))
                 ts = txs[0].get("timeStamp")
-                if ts:
-                    return int(ts)
-
+                if ts: return int(ts)
+                bn = int(txs[0].get("blockNumber", 0))
         if not bn: return None
-
         r4 = requests.get("https://api.etherscan.io/api", params={
             "module":"block","action":"getblockreward",
             "blockno": bn,"apikey": ETHERSCAN_API_KEY,
@@ -167,7 +165,7 @@ def get_creation_timestamp(address: str):
         ts = r4.json().get("result",{}).get("timeStamp")
         return int(ts) if ts else None
     except Exception as e:
-        logger.error(f"Etherscan {address}: {e}")
+        logger.error(f"Etherscan ts {address}: {e}")
         return None
 
 def get_timestamp(addr: str, pair_created_at_ms):
@@ -208,99 +206,87 @@ def get_ath_mc(pair: dict) -> str:
     except:
         return "N/A"
 
-# ─── Tax + LP from honeypot.is ───────────────────────────────────────────────
+# ─── Tax ──────────────────────────────────────────────────────────────────────
 
-def get_tax_and_lp(address: str, dex_id: str) -> tuple:
-    """Returns (tax_str, lp_str) from a single honeypot.is call."""
-    dex = dex_id.lower()
-
-    # V3/V4 pools have no burnable LP
-    if "v4" in dex:
-        lp_status = "🔵 V4 Pool"
-    elif "v3" in dex:
-        lp_status = "🟣 V3 Pool"
-    else:
-        lp_status = "N/A"
-
-    tax_str = "N/A"
+def get_tax_info(address: str) -> str:
     try:
         r = requests.get(f"https://api.honeypot.is/v2/IsHoneypot?address={address}", timeout=6)
         r.raise_for_status()
         data = r.json()
+        if data.get("honeypotResult",{}).get("isHoneypot",False): return "HONEYPOT"
+        sim      = data.get("simulationResult",{})
+        buy_tax  = sim.get("buyTax")
+        sell_tax = sim.get("sellTax")
+        if buy_tax is None and sell_tax is None: return "N/A"
+        buy_str  = f"{buy_tax:.1f}%"  if buy_tax  is not None else "N/A"
+        sell_str = f"{sell_tax:.1f}%" if sell_tax is not None else "N/A"
+        buy_e    = "🟢" if (buy_tax  or 0) <= 5 else "🟡" if (buy_tax  or 0) <= 10 else "🔴"
+        sell_e   = "🟢" if (sell_tax or 0) <= 5 else "🟡" if (sell_tax or 0) <= 10 else "🔴"
+        return f"{buy_e} Buy: {buy_str} | {sell_e} Sell: {sell_str}"
+    except:
+        return "N/A"
 
-        # Tax
-        if data.get("honeypotResult",{}).get("isHoneypot", False):
-            tax_str = "HONEYPOT"
-        else:
-            sim      = data.get("simulationResult", {})
-            buy_tax  = sim.get("buyTax")
-            sell_tax = sim.get("sellTax")
-            if buy_tax is not None or sell_tax is not None:
-                buy_str  = f"{buy_tax:.1f}%"  if buy_tax  is not None else "N/A"
-                sell_str = f"{sell_tax:.1f}%" if sell_tax is not None else "N/A"
-                buy_e    = "🟢" if (buy_tax  or 0) <= 5 else "🟡" if (buy_tax  or 0) <= 10 else "🔴"
-                sell_e   = "🟢" if (sell_tax or 0) <= 5 else "🟡" if (sell_tax or 0) <= 10 else "🔴"
-                tax_str  = f"{buy_e} Buy: {buy_str} | {sell_e} Sell: {sell_str}"
+# ─── LP Status ────────────────────────────────────────────────────────────────
 
-        # LP burn from lpHolders (honeypot.is)
-        if lp_status == "N/A":
-            lp_holders = data.get("lpHolders") or []
-            dead_addrs = {
-                "0x000000000000000000000000000000000000dead",
-                "0x0000000000000000000000000000000000000000",
-            }
-            burned = any(h.get("address","").lower() in dead_addrs for h in lp_holders)
-            locked = any(h.get("isLocked", False) for h in lp_holders)
-            if burned:
-                lp_status = "🔥 Burned"
-            elif locked:
-                lp_status = "🔒 Locked"
-            elif lp_holders:
-                lp_status = "🔓 Not Burned"
-
+def get_lp_status(pair_addr: str, dex_id: str) -> str:
+    dex = dex_id.lower()
+    if "v4" in dex: return "🔵 V4 Pool"
+    if "v3" in dex: return "🟣 V3 Pool"
+    if not pair_addr: return "N/A"
+    try:
+        r = requests.get("https://api.etherscan.io/api", params={
+            "module": "account",
+            "action": "tokenbalance",
+            "contractaddress": pair_addr,
+            "address": "0x000000000000000000000000000000000000dead",
+            "tag": "latest",
+            "apikey": ETHERSCAN_API_KEY,
+        }, timeout=6)
+        result = r.json().get("result", "0")
+        try:
+            bal = int(result)
+        except:
+            bal = 0
+        if bal > 0:
+            return "🔥 Burned"
+        return "🔓 Not Burned"
     except Exception as e:
-        logger.error(f"honeypot.is {address}: {e}")
-
-    return tax_str, lp_status
+        logger.error(f"LP status {pair_addr}: {e}")
+        return "N/A"
 
 # ─── Core Logic ───────────────────────────────────────────────────────────────
 
 def fetch_token_data(addr: str, pair: dict):
-    ts          = get_timestamp(addr, pair.get("pairCreatedAt"))
-    info        = get_token_info(addr)
-    ath         = get_ath_mc(pair)
-    tax, lp_burn = get_tax_and_lp(addr, pair.get("dexId",""))
-    return addr, pair, ts, info, ath, tax, lp_burn
+    ts        = get_timestamp(addr, pair.get("pairCreatedAt"))
+    info      = get_token_info(addr)
+    ath       = get_ath_mc(pair)
+    tax       = get_tax_info(addr)
+    lp_status = get_lp_status(pair.get("pairAddress",""), pair.get("dexId",""))
+    return addr, pair, ts, info, ath, tax, lp_status
 
 def find_og_tokens_eth(name: str):
-    # Search both sources in parallel
     with ThreadPoolExecutor(max_workers=2) as pool:
         f1 = pool.submit(dexscreener_search, name)
         f2 = pool.submit(geckoterminal_search, name)
         ds_pairs = f1.result()
         gt_pairs = f2.result()
 
-    all_pairs = ds_pairs + gt_pairs
-
-    if not all_pairs:
+    if not ds_pairs and not gt_pairs:
         return None, f"No tokens found with the name *{name}* on ETH."
 
-    # Group by token address — deduplicate same CA
-    # Prefer DexScreener results (they have pairCreatedAt timestamp)
-    # Only use GeckoTerminal if token not found in DexScreener at all
+    # Prefer DexScreener (has pairCreatedAt), add GeckoTerminal only for new CAs
     token_map = {}
     for p in ds_pairs:
         addr = p.get("baseToken",{}).get("address","").lower()
         if not addr: continue
-        liq  = float((p.get("liquidity") or {}).get("usd") or 0)
+        liq = float((p.get("liquidity") or {}).get("usd") or 0)
         if addr not in token_map or liq > float((token_map[addr].get("liquidity") or {}).get("usd") or 0):
             token_map[addr] = p
     for p in gt_pairs:
         addr = p.get("baseToken",{}).get("address","").lower()
-        if not addr or addr in token_map: continue  # skip if already found by DexScreener
+        if not addr or addr in token_map: continue
         token_map[addr] = p
 
-    # Filter: must have LP > $500
     liquid = {a: p for a, p in token_map.items()
               if float((p.get("liquidity") or {}).get("usd") or 0) >= 500}
 
@@ -322,7 +308,7 @@ def find_og_tokens_eth(name: str):
 
 # ─── Message Builder ──────────────────────────────────────────────────────────
 
-def build_token_block(pair, ts, info, ath, tax, lp_burn="N/A") -> str:
+def build_token_block(pair, ts, info, ath, tax, lp_status) -> str:
     base      = pair.get("baseToken",{})
     name      = base.get("name","Unknown")
     symbol    = base.get("symbol","?")
@@ -353,14 +339,15 @@ def build_token_block(pair, ts, info, ath, tax, lp_burn="N/A") -> str:
         if url: social_parts.append(f'🌐 [{(w.get("label") or "Website").title()}]({url})')
     socials_line = " | ".join(social_parts) if social_parts else "No socials available"
 
-    honeypot_line = "🚨 *HONEYPOT — DO NOT BUY*" if tax == "HONEYPOT" else f"💸 Tax: {tax}"
+    tax_line = "🚨 *HONEYPOT — DO NOT BUY*" if tax == "HONEYPOT" else f"💸 Tax: {tax}"
 
     return (
         f"✅ *{name}* ({symbol}) ⏳ {age_str(ts)}  📡\n"
         f"`{addr}`\n\n"
         f"💰 MC: {fmt_compact(mc)} | 🚀 ATH MC: {ath} | 🏦 LP: {lp_str} | 🏷️ {dex}\n"
         f"📊 Tx 24h: {txns.get('buys',0)}B/{txns.get('sells',0)}S | 🔊 Vol 5m: {fmt_compact(vol.get('m5'))}\n"
-        f"{honeypot_line}\n\n"
+        f"{tax_line}\n"
+        f"🔥 LP Status: {lp_status}\n\n"
         f"Socials: {socials_line}\n\n"
         f"🔗 [DexT](https://www.dextools.io/app/en/ether/pair-explorer/{pair_addr}) • "
         f"[DexS](https://dexscreener.com/ethereum/{pair_addr}) • "
@@ -380,7 +367,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "👋 *OG Token Finder — ETH*\n\n"
-        "Type `/eth <n>` to find the oldest tokens with active LP.\n\n"
+        "Type `/eth <name>` to find the oldest tokens with active LP.\n\n"
         "*Examples:*\n`/eth pepe`\n`/eth shiba`\n`/eth wojak`",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -401,8 +388,8 @@ async def eth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         results = data["results"]
         total   = data["total"]
-        blocks  = [build_token_block(pair, ts, info, ath, tax, lp_burn)
-                   for _, pair, ts, info, ath, tax, lp_burn in results]
+        blocks  = [build_token_block(pair, ts, info, ath, tax, lp_status)
+                   for _, pair, ts, info, ath, tax, lp_status in results]
         sep    = "\n➖➖➖➖➖➖➖➖➖➖\n"
         footer = f"\n\n📊 Showing {len(results)}/{total} results"
         await loading.edit_text(sep.join(blocks) + footer, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
