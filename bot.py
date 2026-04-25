@@ -228,14 +228,35 @@ def get_tax_info(address: str) -> str:
     except:
         return "N/A"
 
+# ─── LP Burn Check ───────────────────────────────────────────────────────────
+
+def get_lp_burn(pair_addr: str, dex_id: str) -> str:
+    dex = dex_id.lower()
+    if "v4" in dex: return "🔵 V4 Pool"
+    if "v3" in dex: return "🟣 V3 Pool"
+    if not pair_addr: return "N/A"
+    try:
+        dead = "0x000000000000000000000000000000000000dead"
+        r = requests.get("https://api.etherscan.io/api", params={
+            "module": "account", "action": "tokenbalance",
+            "contractaddress": pair_addr,
+            "address": dead,
+            "apikey": ETHERSCAN_API_KEY,
+        }, timeout=6)
+        bal = int(r.json().get("result") or 0)
+        return "🔥 Burned" if bal > 0 else "❌ Not Burned"
+    except:
+        return "N/A"
+
 # ─── Core Logic ───────────────────────────────────────────────────────────────
 
 def fetch_token_data(addr: str, pair: dict):
-    ts   = get_timestamp(addr, pair.get("pairCreatedAt"))
-    info = get_token_info(addr)
-    ath  = get_ath_mc(pair)
-    tax  = get_tax_info(addr)
-    return addr, pair, ts, info, ath, tax
+    ts       = get_timestamp(addr, pair.get("pairCreatedAt"))
+    info     = get_token_info(addr)
+    ath      = get_ath_mc(pair)
+    tax      = get_tax_info(addr)
+    lp_burn  = get_lp_burn(pair.get("pairAddress",""), pair.get("dexId",""))
+    return addr, pair, ts, info, ath, tax, lp_burn
 
 def find_og_tokens_eth(name: str):
     # Search both sources in parallel
@@ -287,7 +308,7 @@ def find_og_tokens_eth(name: str):
 
 # ─── Message Builder ──────────────────────────────────────────────────────────
 
-def build_token_block(pair, ts, info, ath, tax) -> str:
+def build_token_block(pair, ts, info, ath, tax, lp_burn="N/A") -> str:
     base      = pair.get("baseToken",{})
     name      = base.get("name","Unknown")
     symbol    = base.get("symbol","?")
@@ -366,8 +387,8 @@ async def eth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         results = data["results"]
         total   = data["total"]
-        blocks  = [build_token_block(pair, ts, info, ath, tax)
-                   for _, pair, ts, info, ath, tax in results]
+        blocks  = [build_token_block(pair, ts, info, ath, tax, lp_burn)
+                   for _, pair, ts, info, ath, tax, lp_burn in results]
         sep    = "\n➖➖➖➖➖➖➖➖➖➖\n"
         footer = f"\n\n📊 Showing {len(results)}/{total} results"
         await loading.edit_text(sep.join(blocks) + footer, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
