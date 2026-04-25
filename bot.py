@@ -250,14 +250,20 @@ def find_og_tokens_eth(name: str):
     if not all_pairs:
         return None, f"No tokens found with the name *{name}* on ETH."
 
-    # Group by token address — deduplicate same CA, keep highest liquidity pair
+    # Group by token address — deduplicate same CA
+    # Prefer DexScreener results (they have pairCreatedAt timestamp)
+    # Only use GeckoTerminal if token not found in DexScreener at all
     token_map = {}
-    for p in all_pairs:
+    for p in ds_pairs:
         addr = p.get("baseToken",{}).get("address","").lower()
         if not addr: continue
         liq  = float((p.get("liquidity") or {}).get("usd") or 0)
         if addr not in token_map or liq > float((token_map[addr].get("liquidity") or {}).get("usd") or 0):
             token_map[addr] = p
+    for p in gt_pairs:
+        addr = p.get("baseToken",{}).get("address","").lower()
+        if not addr or addr in token_map: continue  # skip if already found by DexScreener
+        token_map[addr] = p
 
     # Filter: must have LP > $500
     liquid = {a: p for a, p in token_map.items()
