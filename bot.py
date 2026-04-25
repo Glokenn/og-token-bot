@@ -242,26 +242,21 @@ def get_tax_and_lp(address: str, dex_id: str) -> tuple:
                 sell_e   = "🟢" if (sell_tax or 0) <= 5 else "🟡" if (sell_tax or 0) <= 10 else "🔴"
                 tax_str  = f"{buy_e} Buy: {buy_str} | {sell_e} Sell: {sell_str}"
 
-        # LP lock/burn from honeypot.is pair data
+        # LP burn from lpHolders (honeypot.is)
         if lp_status == "N/A":
-            pair_data = data.get("pair", {})
-            locks     = pair_data.get("liquidity", {}) if isinstance(pair_data.get("liquidity"), dict) else {}
-            lp_locks  = data.get("lpHolders") or []
-            burned    = any(
-                (h.get("address","").lower() in {
-                    "0x000000000000000000000000000000000000dead",
-                    "0x0000000000000000000000000000000000000000"
-                }) for h in lp_locks
-            )
-            locked = any(h.get("isLocked", False) for h in lp_locks)
+            lp_holders = data.get("lpHolders") or []
+            dead_addrs = {
+                "0x000000000000000000000000000000000000dead",
+                "0x0000000000000000000000000000000000000000",
+            }
+            burned = any(h.get("address","").lower() in dead_addrs for h in lp_holders)
+            locked = any(h.get("isLocked", False) for h in lp_holders)
             if burned:
                 lp_status = "🔥 Burned"
             elif locked:
                 lp_status = "🔒 Locked"
-            elif lp_locks:
+            elif lp_holders:
                 lp_status = "🔓 Not Burned"
-            else:
-                lp_status = "N/A"
 
     except Exception as e:
         logger.error(f"honeypot.is {address}: {e}")
