@@ -122,30 +122,49 @@ def geckoterminal_search(name: str):
 
 def get_creation_timestamp(address: str):
     try:
+        # Method 1: getcontractcreation
         r = requests.get("https://api.etherscan.io/api", params={
             "module":"contract","action":"getcontractcreation",
             "contractaddresses": address,"apikey": ETHERSCAN_API_KEY,
         }, timeout=8)
         data = r.json()
-        if data.get("status") != "1" or not data.get("result"): return None
-        res = data["result"][0]
-        bn  = res.get("blockNumber")
+        bn  = None
+        if data.get("status") == "1" and data.get("result"):
+            res = data["result"][0]
+            bn  = res.get("blockNumber")
+            if not bn:
+                txh = res.get("txHash")
+                if txh:
+                    r2  = requests.get("https://api.etherscan.io/api", params={
+                        "module":"proxy","action":"eth_getTransactionByHash",
+                        "txhash": txh,"apikey": ETHERSCAN_API_KEY,
+                    }, timeout=8)
+                    bn = int(r2.json().get("result",{}).get("blockNumber","0x0"), 16)
+            else:
+                bn = int(bn)
+
+        # Method 2: fallback — get first tx from account tx list
         if not bn:
-            txh = res.get("txHash")
-            if not txh: return None
-            r2  = requests.get("https://api.etherscan.io/api", params={
-                "module":"proxy","action":"eth_getTransactionByHash",
-                "txhash": txh,"apikey": ETHERSCAN_API_KEY,
+            r3 = requests.get("https://api.etherscan.io/api", params={
+                "module":"account","action":"txlist",
+                "address": address,"startblock":0,"endblock":99999999,
+                "page":1,"offset":1,"sort":"asc",
+                "apikey": ETHERSCAN_API_KEY,
             }, timeout=8)
-            bn = int(r2.json().get("result",{}).get("blockNumber","0x0"), 16)
-        else:
-            bn = int(bn)
+            txs = r3.json().get("result") or []
+            if isinstance(txs, list) and txs:
+                bn = int(txs[0].get("blockNumber", 0))
+                ts = txs[0].get("timeStamp")
+                if ts:
+                    return int(ts)
+
         if not bn: return None
-        r3 = requests.get("https://api.etherscan.io/api", params={
+
+        r4 = requests.get("https://api.etherscan.io/api", params={
             "module":"block","action":"getblockreward",
             "blockno": bn,"apikey": ETHERSCAN_API_KEY,
         }, timeout=8)
-        ts = r3.json().get("result",{}).get("timeStamp")
+        ts = r4.json().get("result",{}).get("timeStamp")
         return int(ts) if ts else None
     except Exception as e:
         logger.error(f"Etherscan {address}: {e}")
