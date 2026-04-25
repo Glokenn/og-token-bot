@@ -18,8 +18,6 @@ MAX_RESULTS = 5
 OWNER_ID    = 7525750969
 whitelist   = set()
 
-DEAD = {"0x000000000000000000000000000000000000dead", "0x0000000000000000000000000000000000000000"}
-
 # ─── Auth ─────────────────────────────────────────────────────────────────────
 
 def is_allowed(user_id: int) -> bool:
@@ -73,71 +71,90 @@ def dexscreener_search(name: str):
         logger.error(f"DexScreener: {e}")
         return []
 
-# ─── Etherscan ────────────────────────────────────────────────────────────────
+# ─── GeckoTerminal ────────────────────────────────────────────────────────────
 
-def etherscan(params: dict):
+def geckoterminal_search(name: str):
     try:
-        params["apikey"] = ETHERSCAN_API_KEY
-        r = requests.get("https://api.etherscan.io/api", params=params, timeout=8)
-        return r.json()
-    except:
-        return {}
+        r = requests.get(
+            "https://api.geckoterminal.com/api/v2/search/pools",
+            params={"query": name, "network": "eth", "page": 1},
+            headers={"Accept": "application/json;version=20230302"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        pools = r.json().get("data") or []
+        nl      = name.lower().strip()
+        results = []
+        for pool in pools:
+            attrs      = pool.get("attributes", {})
+            sym        = attrs.get("base_token_symbol", "").lower()
+            pool_name  = attrs.get("name", "").lower()
+            liq_usd    = float(attrs.get("reserve_in_usd") or 0)
+            if liq_usd < 500: continue
+            if sym != nl and pool_name.split(" / ")[0].strip() != nl: continue
+            token_addr = (pool.get("relationships", {})
+                             .get("base_token", {})
+                             .get("data", {})
+                             .get("id", "")
+                             .replace("eth_", ""))
+            pool_addr  = attrs.get("address", "")
+            vol        = attrs.get("volume_usd", {}) or {}
+            results.append({
+                "chainId":       "ethereum",
+                "pairAddress":   pool_addr,
+                "baseToken":     {"address": token_addr, "symbol": sym.upper(), "name": pool_name.split(" / ")[0].strip().title()},
+                "quoteToken":    {"symbol": "WETH"},
+                "dexId":         attrs.get("dex_id", "unknown"),
+                "priceUsd":      str(attrs.get("base_token_price_usd") or 0),
+                "fdv":           attrs.get("fdv_usd"),
+                "liquidity":     {"usd": liq_usd},
+                "volume":        {"m5": vol.get("m5"), "h1": vol.get("h1"), "h6": vol.get("h6"), "h24": vol.get("h24")},
+                "txns":          {"h24": {"buys": 0, "sells": 0}},
+                "priceChange":   {},
+                "pairCreatedAt": None,
+            })
+        return results
+    except Exception as e:
+        logger.error(f"GeckoTerminal: {e}")
+        return []
+
+# ─── Etherscan ────────────────────────────────────────────────────────────────
 
 def get_creation_timestamp(address: str):
     try:
-        data = etherscan({"module":"contract","action":"getcontractcreation","contractaddresses":address})
+        r = requests.get("https://api.etherscan.io/api", params={
+            "module":"contract","action":"getcontractcreation",
+            "contractaddresses": address,"apikey": ETHERSCAN_API_KEY,
+        }, timeout=8)
+        data = r.json()
         if data.get("status") != "1" or not data.get("result"): return None
         res = data["result"][0]
         bn  = res.get("blockNumber")
         if not bn:
             txh = res.get("txHash")
             if not txh: return None
-            r2  = etherscan({"module":"proxy","action":"eth_getTransactionByHash","txhash":txh})
-            bn  = int(r2.get("result",{}).get("blockNumber","0x0"), 16)
+            r2  = requests.get("https://api.etherscan.io/api", params={
+                "module":"proxy","action":"eth_getTransactionByHash",
+                "txhash": txh,"apikey": ETHERSCAN_API_KEY,
+            }, timeout=8)
+            bn = int(r2.json().get("result",{}).get("blockNumber","0x0"), 16)
         else:
             bn = int(bn)
         if not bn: return None
-        r3 = etherscan({"module":"block","action":"getblockreward","blockno":bn})
-        ts = r3.get("result",{}).get("timeStamp")
+        r3 = requests.get("https://api.etherscan.io/api", params={
+            "module":"block","action":"getblockreward",
+            "blockno": bn,"apikey": ETHERSCAN_API_KEY,
+        }, timeout=8)
+        ts = r3.json().get("result",{}).get("timeStamp")
         return int(ts) if ts else None
     except Exception as e:
-        logger.error(f"Etherscan ts {address}: {e}")
+        logger.error(f"Etherscan {address}: {e}")
         return None
 
 def get_timestamp(addr: str, pair_created_at_ms):
     if pair_created_at_ms:
         return int(pair_created_at_ms) // 1000
     return get_creation_timestamp(addr)
-
-# ─── LP Burned + CA Renounced ─────────────────────────────────────────────────
-
-def get_lp_burned(pair_addr: str, dex_id: str) -> str:
-    if "v3" in dex_id.lower():
-        return "V3"
-    if not pair_addr:
-        return "N/A"
-    try:
-        dead_bal = int(etherscan({
-            "module":"account","action":"tokenbalance",
-            "contractaddress": pair_addr,
-            "address": "0x000000000000000000000000000000000000dead",
-        }).get("result") or 0)
-        return "🔥 Burned" if dead_bal > 0 else "❌ Not Burned"
-    except:
-        return "N/A"
-
-def get_ca_renounced(token_addr: str) -> str:
-    try:
-        result = etherscan({
-            "module":"proxy","action":"eth_call",
-            "to": token_addr,"data":"0x8da5cb5b","tag":"latest",
-        }).get("result","")
-        if result and result != "0x" and len(result) >= 42:
-            owner = "0x" + result[-40:]
-            return "✅ Renounced" if owner.lower() in DEAD else "⚠️ Not Renounced"
-        return "N/A"
-    except:
-        return "N/A"
 
 # ─── Socials ──────────────────────────────────────────────────────────────────
 
@@ -195,28 +212,35 @@ def get_tax_info(address: str) -> str:
 # ─── Core Logic ───────────────────────────────────────────────────────────────
 
 def fetch_token_data(addr: str, pair: dict):
-    ts         = get_timestamp(addr, pair.get("pairCreatedAt"))
-    info       = get_token_info(addr)
-    ath        = get_ath_mc(pair)
-    tax        = get_tax_info(addr)
-    pair_addr  = pair.get("pairAddress","")
-    dex_id     = pair.get("dexId","")
-    lp_burned  = get_lp_burned(pair_addr, dex_id)
-    renounced  = get_ca_renounced(addr)
-    return addr, pair, ts, info, ath, tax, lp_burned, renounced
+    ts   = get_timestamp(addr, pair.get("pairCreatedAt"))
+    info = get_token_info(addr)
+    ath  = get_ath_mc(pair)
+    tax  = get_tax_info(addr)
+    return addr, pair, ts, info, ath, tax
 
 def find_og_tokens_eth(name: str):
-    pairs = dexscreener_search(name)
-    if not pairs:
+    # Search both sources in parallel
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f1 = pool.submit(dexscreener_search, name)
+        f2 = pool.submit(geckoterminal_search, name)
+        ds_pairs = f1.result()
+        gt_pairs = f2.result()
+
+    all_pairs = ds_pairs + gt_pairs
+
+    if not all_pairs:
         return None, f"No tokens found with the name *{name}* on ETH."
 
+    # Group by token address — deduplicate same CA, keep highest liquidity pair
     token_map = {}
-    for p in pairs:
+    for p in all_pairs:
         addr = p.get("baseToken",{}).get("address","").lower()
+        if not addr: continue
         liq  = float((p.get("liquidity") or {}).get("usd") or 0)
         if addr not in token_map or liq > float((token_map[addr].get("liquidity") or {}).get("usd") or 0):
             token_map[addr] = p
 
+    # Filter: must have LP > $500
     liquid = {a: p for a, p in token_map.items()
               if float((p.get("liquidity") or {}).get("usd") or 0) >= 500}
 
@@ -238,7 +262,7 @@ def find_og_tokens_eth(name: str):
 
 # ─── Message Builder ──────────────────────────────────────────────────────────
 
-def build_token_block(pair, ts, info, ath, tax, lp_burned, renounced) -> str:
+def build_token_block(pair, ts, info, ath, tax) -> str:
     base      = pair.get("baseToken",{})
     name      = base.get("name","Unknown")
     symbol    = base.get("symbol","?")
@@ -276,8 +300,7 @@ def build_token_block(pair, ts, info, ath, tax, lp_burned, renounced) -> str:
         f"`{addr}`\n\n"
         f"💰 MC: {fmt_compact(mc)} | 🚀 ATH MC: {ath} | 🏦 LP: {lp_str} | 🏷️ {dex}\n"
         f"📊 Tx 24h: {txns.get('buys',0)}B/{txns.get('sells',0)}S | 🔊 Vol 5m: {fmt_compact(vol.get('m5'))}\n"
-        f"{honeypot_line}\n"
-        f"🔥 LP: {lp_burned} | 📄 CA: {renounced}\n\n"
+        f"{honeypot_line}\n\n"
         f"Socials: {socials_line}\n\n"
         f"🔗 [DexT](https://www.dextools.io/app/en/ether/pair-explorer/{pair_addr}) • "
         f"[DexS](https://dexscreener.com/ethereum/{pair_addr}) • "
@@ -297,7 +320,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "👋 *OG Token Finder — ETH*\n\n"
-        "Type `/eth <name>` to find the oldest tokens with active LP.\n\n"
+        "Type `/eth <n>` to find the oldest tokens with active LP.\n\n"
         "*Examples:*\n`/eth pepe`\n`/eth shiba`\n`/eth wojak`",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -318,8 +341,8 @@ async def eth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         results = data["results"]
         total   = data["total"]
-        blocks  = [build_token_block(pair, ts, info, ath, tax, lp_burned, renounced)
-                   for _, pair, ts, info, ath, tax, lp_burned, renounced in results]
+        blocks  = [build_token_block(pair, ts, info, ath, tax)
+                   for _, pair, ts, info, ath, tax in results]
         sep    = "\n➖➖➖➖➖➖➖➖➖➖\n"
         footer = f"\n\n📊 Showing {len(results)}/{total} results"
         await loading.edit_text(sep.join(blocks) + footer, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
