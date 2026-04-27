@@ -18,263 +18,217 @@ MAX_RESULTS = 5
 OWNER_ID    = 7525750969
 whitelist   = set()
 
-DEAD_ADDRS = {
-    "0x000000000000000000000000000000000000dead",
-    "0x0000000000000000000000000000000000000000",
-}
+def is_allowed(uid): return uid == OWNER_ID or uid in whitelist
 
-# ─── Auth ─────────────────────────────────────────────────────────────────────
-
-def is_allowed(user_id: int) -> bool:
-    return user_id == OWNER_ID or user_id in whitelist
-
-# ─── Formatters ───────────────────────────────────────────────────────────────
-
-def fmt_compact(n):
+def fmt(n):
     if n is None: return "N/A"
     n = float(n)
-    if n >= 1_000_000_000: return f"{n/1_000_000_000:.2f}B"
-    if n >= 1_000_000:     return f"{n/1_000_000:.2f}M"
-    if n >= 1_000:         return f"{n/1_000:.2f}K"
-    if n == 0:             return "N/A"
+    if n >= 1e9:  return f"{n/1e9:.2f}B"
+    if n >= 1e6:  return f"{n/1e6:.2f}M"
+    if n >= 1e3:  return f"{n/1e3:.2f}K"
+    if n == 0:    return "N/A"
     return f"{n:.2f}"
 
-def age_str(ts):
+def age(ts):
     if not ts: return "Unknown"
-    delta         = datetime.now(timezone.utc) - datetime.fromtimestamp(ts, tz=timezone.utc)
-    total_seconds = int(delta.total_seconds())
-    years   = total_seconds // (365*24*3600); total_seconds %= (365*24*3600)
-    months  = total_seconds // (30*24*3600);  total_seconds %= (30*24*3600)
-    days    = total_seconds // (24*3600);     total_seconds %= (24*3600)
-    hours   = total_seconds // 3600;          total_seconds %= 3600
-    minutes = total_seconds // 60
-    parts = []
-    if years:   parts.append(f"{years}y")
-    if months:  parts.append(f"{months}mo")
-    if days:    parts.append(f"{days}d")
-    if hours:   parts.append(f"{hours}h")
-    parts.append(f"{minutes}m")
-    return " ".join(parts) + " ago"
+    s = int((datetime.now(timezone.utc) - datetime.fromtimestamp(ts, tz=timezone.utc)).total_seconds())
+    y = s//(365*86400); s %= 365*86400
+    mo= s//(30*86400);  s %= 30*86400
+    d = s//86400;       s %= 86400
+    h = s//3600;        s %= 3600
+    m = s//60
+    p = []
+    if y:  p.append(f"{y}y")
+    if mo: p.append(f"{mo}mo")
+    if d:  p.append(f"{d}d")
+    if h:  p.append(f"{h}h")
+    p.append(f"{m}m")
+    return " ".join(p) + " ago"
 
-# ─── DexScreener ──────────────────────────────────────────────────────────────
+def dex_name(dex_id):
+    d = dex_id.lower()
+    if "v4" in d and "uniswap" in d: return "Uniswap V4"
+    if "v3" in d and "uniswap" in d: return "Uniswap V3"
+    if d == "uniswap" or ("v2" in d and "uniswap" in d): return "Uniswap V2"
+    if "sushiswap" in d:  return "SushiSwap"
+    if "pancakeswap" in d: return "PancakeSwap"
+    return d.replace("-"," ").replace("_"," ").title()
 
-def dexscreener_search(name: str):
+def dex_matches_filter(dex_id, filt):
+    d = dex_id.lower()
+    if filt == "v2": return d == "uniswap" or "v2" in d
+    if filt == "v3": return "v3" in d
+    if filt == "v4": return "v4" in d
+    return True
+
+# ─── Search ───────────────────────────────────────────────────────────────────
+
+def search_dexscreener(name):
     try:
         r = requests.get(f"https://api.dexscreener.com/latest/dex/search?q={name}", timeout=10)
         r.raise_for_status()
-        pairs = r.json().get("pairs") or []
         nl = name.lower().strip()
-        return [
-            p for p in pairs
-            if p.get("chainId","").lower() == "ethereum"
-            and (
-                p.get("baseToken",{}).get("symbol","").lower() == nl
-                or p.get("baseToken",{}).get("name","").lower() == nl
-            )
-        ]
+        return [p for p in (r.json().get("pairs") or [])
+                if p.get("chainId","").lower() == "ethereum"
+                and (p.get("baseToken",{}).get("symbol","").lower() == nl
+                     or p.get("baseToken",{}).get("name","").lower() == nl)]
     except Exception as e:
         logger.error(f"DexScreener: {e}")
         return []
 
-# ─── GeckoTerminal ────────────────────────────────────────────────────────────
-
-def geckoterminal_search(name: str):
+def search_geckoterminal(name):
     try:
-        r = requests.get(
-            "https://api.geckoterminal.com/api/v2/search/pools",
+        r = requests.get("https://api.geckoterminal.com/api/v2/search/pools",
             params={"query": name, "network": "eth", "page": 1},
-            headers={"Accept": "application/json;version=20230302"},
-            timeout=10,
-        )
+            headers={"Accept": "application/json;version=20230302"}, timeout=10)
         r.raise_for_status()
-        pools = r.json().get("data") or []
         nl = name.lower().strip()
-        results = []
-        for pool in pools:
-            attrs     = pool.get("attributes", {})
-            sym       = attrs.get("base_token_symbol", "").lower()
-            pool_name = attrs.get("name", "").lower()
-            liq_usd   = float(attrs.get("reserve_in_usd") or 0)
-            if liq_usd < 500: continue
-            if sym != nl and pool_name.split(" / ")[0].strip() != nl: continue
-            token_addr = (pool.get("relationships", {})
-                             .get("base_token", {})
-                             .get("data", {})
-                             .get("id", "")
-                             .replace("eth_", ""))
-            pool_addr = attrs.get("address", "")
-            vol = attrs.get("volume_usd", {}) or {}
-            results.append({
-                "chainId":       "ethereum",
-                "pairAddress":   pool_addr,
-                "baseToken":     {"address": token_addr, "symbol": sym.upper(), "name": pool_name.split(" / ")[0].strip().title()},
-                "quoteToken":    {"symbol": "WETH"},
-                "dexId":         attrs.get("dex_id", "unknown"),
-                "priceUsd":      str(attrs.get("base_token_price_usd") or 0),
-                "fdv":           attrs.get("fdv_usd"),
-                "liquidity":     {"usd": liq_usd},
-                "volume":        {"m5": vol.get("m5"), "h1": vol.get("h1"), "h6": vol.get("h6"), "h24": vol.get("h24")},
-                "txns":          {"h24": {"buys": 0, "sells": 0}},
-                "priceChange":   {},
-                "pairCreatedAt": None,
+        out = []
+        for pool in (r.json().get("data") or []):
+            a = pool.get("attributes", {})
+            sym = a.get("base_token_symbol", "").lower()
+            pn  = a.get("name", "").lower()
+            liq = float(a.get("reserve_in_usd") or 0)
+            if liq < 400: continue
+            if sym != nl and pn.split(" / ")[0].strip() != nl: continue
+            ta = pool.get("relationships",{}).get("base_token",{}).get("data",{}).get("id","").replace("eth_","")
+            vol = a.get("volume_usd",{}) or {}
+            out.append({
+                "chainId":"ethereum","pairAddress":a.get("address",""),
+                "baseToken":{"address":ta,"symbol":sym.upper(),"name":pn.split(" / ")[0].strip().title()},
+                "quoteToken":{"symbol":"WETH"},"dexId":a.get("dex_id","unknown"),
+                "priceUsd":str(a.get("base_token_price_usd") or 0),"fdv":a.get("fdv_usd"),
+                "liquidity":{"usd":liq},
+                "volume":{"m5":vol.get("m5"),"h1":vol.get("h1"),"h6":vol.get("h6"),"h24":vol.get("h24")},
+                "txns":{"h24":{"buys":0,"sells":0}},"priceChange":{},"pairCreatedAt":None,
             })
-        return results
+        return out
     except Exception as e:
         logger.error(f"GeckoTerminal: {e}")
         return []
 
-# ─── Etherscan ────────────────────────────────────────────────────────────────
+# ─── Data fetchers ────────────────────────────────────────────────────────────
 
-def get_creation_timestamp(address: str):
+def get_timestamp(addr, pair_created_ms):
+    if pair_created_ms:
+        return int(pair_created_ms) // 1000
     try:
         r = requests.get("https://api.etherscan.io/api", params={
             "module":"contract","action":"getcontractcreation",
-            "contractaddresses": address,"apikey": ETHERSCAN_API_KEY,
-        }, timeout=8)
-        data = r.json()
-        bn = None
-        if data.get("status") == "1" and data.get("result"):
-            res = data["result"][0]
-            bn  = res.get("blockNumber")
+            "contractaddresses":addr,"apikey":ETHERSCAN_API_KEY}, timeout=8)
+        d = r.json()
+        if d.get("status")=="1" and d.get("result"):
+            res = d["result"][0]
+            bn = res.get("blockNumber")
             if not bn:
                 txh = res.get("txHash")
                 if txh:
                     r2 = requests.get("https://api.etherscan.io/api", params={
                         "module":"proxy","action":"eth_getTransactionByHash",
-                        "txhash": txh,"apikey": ETHERSCAN_API_KEY,
-                    }, timeout=8)
-                    bn = int(r2.json().get("result",{}).get("blockNumber","0x0"), 16)
+                        "txhash":txh,"apikey":ETHERSCAN_API_KEY}, timeout=8)
+                    bn = int(r2.json().get("result",{}).get("blockNumber","0x0"),16)
             else:
                 bn = int(bn)
-        if not bn:
-            r3 = requests.get("https://api.etherscan.io/api", params={
-                "module":"account","action":"txlist",
-                "address": address,"startblock":0,"endblock":99999999,
-                "page":1,"offset":1,"sort":"asc","apikey": ETHERSCAN_API_KEY,
-            }, timeout=8)
-            txs = r3.json().get("result") or []
-            if isinstance(txs, list) and txs:
-                ts = txs[0].get("timeStamp")
+            if bn:
+                r3 = requests.get("https://api.etherscan.io/api", params={
+                    "module":"block","action":"getblockreward",
+                    "blockno":bn,"apikey":ETHERSCAN_API_KEY}, timeout=8)
+                ts = r3.json().get("result",{}).get("timeStamp")
                 if ts: return int(ts)
-                bn = int(txs[0].get("blockNumber", 0))
-        if not bn: return None
+        # Fallback: first tx
         r4 = requests.get("https://api.etherscan.io/api", params={
-            "module":"block","action":"getblockreward",
-            "blockno": bn,"apikey": ETHERSCAN_API_KEY,
-        }, timeout=8)
-        ts = r4.json().get("result",{}).get("timeStamp")
-        return int(ts) if ts else None
+            "module":"account","action":"txlist","address":addr,
+            "startblock":0,"endblock":99999999,"page":1,"offset":1,
+            "sort":"asc","apikey":ETHERSCAN_API_KEY}, timeout=8)
+        txs = r4.json().get("result") or []
+        if isinstance(txs, list) and txs:
+            ts = txs[0].get("timeStamp")
+            if ts: return int(ts)
     except Exception as e:
-        logger.error(f"Etherscan ts {address}: {e}")
-        return None
+        logger.error(f"Etherscan ts {addr}: {e}")
+    return None
 
-def get_timestamp(addr: str, pair_created_at_ms):
-    if pair_created_at_ms:
-        return int(pair_created_at_ms) // 1000
-    return get_creation_timestamp(addr)
-
-# ─── Socials ──────────────────────────────────────────────────────────────────
-
-def get_token_info(address: str):
+def get_socials(addr):
     try:
-        r = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{address}", timeout=6)
+        r = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{addr}", timeout=6)
         r.raise_for_status()
         pairs = r.json().get("pairs") or []
         return pairs[0].get("info") or {} if pairs else {}
     except:
         return {}
 
-# ─── ATH MC ───────────────────────────────────────────────────────────────────
-
-def get_ath_mc(pair: dict) -> str:
+def get_ath(pair):
     try:
-        pair_addr     = pair.get("pairAddress","")
-        current_price = float(pair.get("priceUsd") or 0)
-        fdv           = float(pair.get("fdv") or 0)
-        if not pair_addr or not current_price or not fdv: return "N/A"
-        r = requests.get(
-            f"https://api.geckoterminal.com/api/v2/networks/eth/pools/{pair_addr}/ohlcv/day",
+        pa = pair.get("pairAddress","")
+        cp = float(pair.get("priceUsd") or 0)
+        fdv = float(pair.get("fdv") or 0)
+        if not pa or not cp or not fdv: return "N/A"
+        r = requests.get(f"https://api.geckoterminal.com/api/v2/networks/eth/pools/{pa}/ohlcv/day",
             params={"limit":1000,"currency":"usd"},
-            headers={"Accept":"application/json;version=20230302"},
-            timeout=8,
-        )
+            headers={"Accept":"application/json;version=20230302"}, timeout=8)
         r.raise_for_status()
         ohlcv = r.json().get("data",{}).get("attributes",{}).get("ohlcv_list",[])
         if not ohlcv: return "N/A"
-        ath_price = max(entry[2] for entry in ohlcv)
-        return fmt_compact((ath_price / current_price) * fdv) if ath_price and current_price > 0 else "N/A"
+        ath_p = max(e[2] for e in ohlcv)
+        return fmt((ath_p/cp)*fdv) if ath_p and cp > 0 else "N/A"
     except:
         return "N/A"
 
-# ─── Tax ──────────────────────────────────────────────────────────────────────
-
-def get_tax_info(address: str) -> str:
+def get_tax(addr):
     try:
-        r = requests.get(f"https://api.honeypot.is/v2/IsHoneypot?address={address}", timeout=6)
+        r = requests.get(f"https://api.honeypot.is/v2/IsHoneypot?address={addr}", timeout=6)
         r.raise_for_status()
-        data = r.json()
-        if data.get("honeypotResult",{}).get("isHoneypot",False): return "HONEYPOT"
-        sim      = data.get("simulationResult",{})
-        buy_tax  = sim.get("buyTax")
-        sell_tax = sim.get("sellTax")
-        if buy_tax is None and sell_tax is None: return "N/A"
-        buy_str  = f"{buy_tax:.1f}%"  if buy_tax  is not None else "N/A"
-        sell_str = f"{sell_tax:.1f}%" if sell_tax is not None else "N/A"
-        buy_e    = "🟢" if (buy_tax  or 0) <= 5 else "🟡" if (buy_tax  or 0) <= 10 else "🔴"
-        sell_e   = "🟢" if (sell_tax or 0) <= 5 else "🟡" if (sell_tax or 0) <= 10 else "🔴"
-        return f"{buy_e} Buy: {buy_str} | {sell_e} Sell: {sell_str}"
+        d = r.json()
+        if d.get("honeypotResult",{}).get("isHoneypot",False): return "HONEYPOT"
+        s = d.get("simulationResult",{})
+        bt, st = s.get("buyTax"), s.get("sellTax")
+        if bt is None and st is None: return "N/A"
+        bs = f"{bt:.1f}%" if bt is not None else "N/A"
+        ss = f"{st:.1f}%" if st is not None else "N/A"
+        be = "🟢" if (bt or 0)<=5 else "🟡" if (bt or 0)<=10 else "🔴"
+        se = "🟢" if (st or 0)<=5 else "🟡" if (st or 0)<=10 else "🔴"
+        return f"{be} Buy: {bs} | {se} Sell: {ss}"
     except:
         return "N/A"
 
-# ─── Core Logic ───────────────────────────────────────────────────────────────
+# ─── Core ─────────────────────────────────────────────────────────────────────
 
-def fetch_token_data(addr: str, pair: dict):
-    ts        = get_timestamp(addr, pair.get("pairCreatedAt"))
-    info      = get_token_info(addr)
-    ath       = get_ath_mc(pair)
-    tax       = get_tax_info(addr)
+def fetch_one(addr, pair):
+    ts   = get_timestamp(addr, pair.get("pairCreatedAt"))
+    info = get_socials(addr)
+    ath  = get_ath(pair)
+    tax  = get_tax(addr)
     return addr, pair, ts, info, ath, tax
 
-def find_og_tokens_eth(name: str, dex_filter: str = None):
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        f1 = pool.submit(dexscreener_search, name)
-        f2 = pool.submit(geckoterminal_search, name)
-        ds_pairs = f1.result()
-        gt_pairs = f2.result()
+def find_tokens(name, dex_filter=None):
+    with ThreadPoolExecutor(max_workers=2) as p:
+        f1 = p.submit(search_dexscreener, name)
+        f2 = p.submit(search_geckoterminal, name)
+        ds = f1.result()
+        gt = f2.result()
 
-    if not ds_pairs and not gt_pairs:
+    # Filter by dex FIRST
+    if dex_filter:
+        ds = [p for p in ds if dex_matches_filter(p.get("dexId",""), dex_filter)]
+        gt = [p for p in gt if dex_matches_filter(p.get("dexId",""), dex_filter)]
+
+    if not ds and not gt:
         return None, f"No tokens found with the name *{name}* on ETH."
 
-    # Apply dex filter FIRST before deduplication
-    if dex_filter:
-        def dex_matches(dex_id, filt):
-            dex_id = dex_id.lower()
-            # DexScreener uses "uniswap" for V2, "uniswap_v3" or "uniswap-v3" for V3
-            if filt == "v2":
-                return dex_id == "uniswap" or "v2" in dex_id
-            elif filt == "v3":
-                return "v3" in dex_id
-            elif filt == "v4":
-                return "v4" in dex_id
-            return True
-        ds_pairs = [p for p in ds_pairs if dex_matches(p.get("dexId",""), dex_filter)]
-        gt_pairs = [p for p in gt_pairs if dex_matches(p.get("dexId",""), dex_filter)]
+    # Deduplicate: prefer DexScreener
+    tmap = {}
+    for p in ds:
+        a = p.get("baseToken",{}).get("address","").lower()
+        if not a: continue
+        l = float((p.get("liquidity") or {}).get("usd") or 0)
+        if a not in tmap or l > float((tmap[a].get("liquidity") or {}).get("usd") or 0):
+            tmap[a] = p
+    for p in gt:
+        a = p.get("baseToken",{}).get("address","").lower()
+        if not a or a in tmap: continue
+        tmap[a] = p
 
-    # Prefer DexScreener (has pairCreatedAt), add GeckoTerminal only for new CAs
-    token_map = {}
-    for p in ds_pairs:
-        addr = p.get("baseToken",{}).get("address","").lower()
-        if not addr: continue
-        liq = float((p.get("liquidity") or {}).get("usd") or 0)
-        if addr not in token_map or liq > float((token_map[addr].get("liquidity") or {}).get("usd") or 0):
-            token_map[addr] = p
-    for p in gt_pairs:
-        addr = p.get("baseToken",{}).get("address","").lower()
-        if not addr or addr in token_map: continue
-        token_map[addr] = p
-
-    liquid = {a: p for a, p in token_map.items()
-              if float((p.get("liquidity") or {}).get("usd") or 0) >= 400}
+    liquid = {a:p for a,p in tmap.items() if float((p.get("liquidity") or {}).get("usd") or 0) >= 400}
 
     if not liquid:
         return None, f"Found *{name}* on ETH but none have active LP (liquidity > $400)."
@@ -282,66 +236,51 @@ def find_og_tokens_eth(name: str, dex_filter: str = None):
     total = len(liquid)
     results = []
     with ThreadPoolExecutor(max_workers=10) as pool:
-        futures = {pool.submit(fetch_token_data, addr, pair): addr for addr, pair in liquid.items()}
-        for future in as_completed(futures):
-            try:
-                results.append(future.result())
-            except Exception as e:
-                logger.error(f"Worker error: {e}")
+        futs = {pool.submit(fetch_one, a, p): a for a,p in liquid.items()}
+        for f in as_completed(futs):
+            try: results.append(f.result())
+            except Exception as e: logger.error(f"Worker: {e}")
 
     results.sort(key=lambda x: x[2] if x[2] else float("inf"))
     return {"results": results[:MAX_RESULTS], "total": total}, None
 
-# ─── Message Builder ──────────────────────────────────────────────────────────
+# ─── Message ──────────────────────────────────────────────────────────────────
 
-def build_token_block(pair, ts, info, ath, tax) -> str:
-    base      = pair.get("baseToken",{})
-    name      = base.get("name","Unknown")
-    symbol    = base.get("symbol","?")
-    addr      = base.get("address","")
-    dex_raw   = pair.get("dexId","Unknown").lower()
-    if "v4" in dex_raw and "uniswap" in dex_raw:   dex = "Uniswap V4"
-    elif "v3" in dex_raw and "uniswap" in dex_raw:  dex = "Uniswap V3"
-    elif dex_raw == "uniswap" or ("v2" in dex_raw and "uniswap" in dex_raw): dex = "Uniswap V2"
-    elif "sushiswap" in dex_raw:  dex = "SushiSwap"
-    elif "pancakeswap" in dex_raw: dex = "PancakeSwap"
-    else: dex = dex_raw.replace("-"," ").title()
-    pair_addr = pair.get("pairAddress", addr)
-    mc        = pair.get("fdv")
-    liq       = pair.get("liquidity") or {}
-    liq_quote = liq.get("quote")
-    quote_sym = (pair.get("quoteToken") or {}).get("symbol","")
-    lp_str    = (f"{float(liq_quote):.2f} {quote_sym.upper()}"
-                 if liq_quote and quote_sym.upper() in ("WETH","ETH")
-                 else f"${fmt_compact(liq.get('usd'))}")
-    txns  = (pair.get("txns") or {}).get("h24") or {}
+def build_msg(pair, ts, info, ath, tax):
+    b     = pair.get("baseToken",{})
+    name  = b.get("name","Unknown")
+    sym   = b.get("symbol","?")
+    addr  = b.get("address","")
+    dex   = dex_name(pair.get("dexId","Unknown"))
+    pa    = pair.get("pairAddress", addr)
+    mc    = pair.get("fdv")
+    liq   = pair.get("liquidity") or {}
+    lq    = liq.get("quote")
+    qs    = (pair.get("quoteToken") or {}).get("symbol","")
+    lp    = f"{float(lq):.2f} {qs.upper()}" if lq and qs.upper() in ("WETH","ETH") else f"${fmt(liq.get('usd'))}"
+    tx    = (pair.get("txns") or {}).get("h24") or {}
     vol   = pair.get("volume") or {}
-
-    socials_raw  = info.get("socials") or []
-    websites_raw = info.get("websites") or []
-    social_parts = []
-    for s in socials_raw:
-        t = (s.get("type") or "").lower(); url = s.get("url","")
-        if not url: continue
-        if t == "twitter":    social_parts.append(f'🐦 [X]({url})')
-        elif t == "telegram": social_parts.append(f'✈️ [Telegram]({url})')
-        else: social_parts.append(f'🔗 [{t.title()}]({url})')
-    for w in websites_raw:
-        url = w.get("url","")
-        if url: social_parts.append(f'🌐 [{(w.get("label") or "Website").title()}]({url})')
-    socials_line = " | ".join(social_parts) if social_parts else "No socials available"
-
-    tax_line = "🚨 *HONEYPOT — DO NOT BUY*" if tax == "HONEYPOT" else f"💸 Tax: {tax}"
-
+    sp = []
+    for s in (info.get("socials") or []):
+        t = (s.get("type") or "").lower(); u = s.get("url","")
+        if not u: continue
+        if t == "twitter":    sp.append(f'🐦 [X]({u})')
+        elif t == "telegram": sp.append(f'✈️ [Telegram]({u})')
+        else: sp.append(f'🔗 [{t.title()}]({u})')
+    for w in (info.get("websites") or []):
+        u = w.get("url","")
+        if u: sp.append(f'🌐 [{(w.get("label") or "Website").title()}]({u})')
+    soc = " | ".join(sp) if sp else "No socials available"
+    tl = "🚨 *HONEYPOT — DO NOT BUY*" if tax == "HONEYPOT" else f"💸 Tax: {tax}"
     return (
-        f"✅ *{name}* ({symbol}) ⏳ {age_str(ts)}  📡\n"
+        f"✅ *{name}* ({sym}) ⏳ {age(ts)}  📡\n"
         f"`{addr}`\n\n"
-        f"💰 MC: {fmt_compact(mc)} | 🚀 ATH MC: {ath} | 🏦 LP: {lp_str} | 🏷️ {dex}\n"
-        f"📊 Tx 24h: {txns.get('buys',0)}B/{txns.get('sells',0)}S | 🔊 Vol 5m: {fmt_compact(vol.get('m5'))}\n"
-        f"{tax_line}\n\n"
-        f"Socials: {socials_line}\n\n"
-        f"🔗 [DexT](https://www.dextools.io/app/en/ether/pair-explorer/{pair_addr}) • "
-        f"[DexS](https://dexscreener.com/ethereum/{pair_addr}) • "
+        f"💰 MC: {fmt(mc)} | 🚀 ATH MC: {ath} | 🏦 LP: {lp} | 🏷️ {dex}\n"
+        f"📊 Tx 24h: {tx.get('buys',0)}B/{tx.get('sells',0)}S | 🔊 Vol 5m: {fmt(vol.get('m5'))}\n"
+        f"{tl}\n\n"
+        f"Socials: {soc}\n\n"
+        f"🔗 [DexT](https://www.dextools.io/app/en/ether/pair-explorer/{pa}) • "
+        f"[DexS](https://dexscreener.com/ethereum/{pa}) • "
         f"[CA](https://etherscan.io/address/{addr}) • "
         f"[MAE](https://t.me/maestro?start={addr}) • "
         f"[MAE Pro](https://t.me/maestropro?start={addr}) • "
@@ -358,92 +297,75 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "👋 *OG Token Finder — ETH*\n\n"
-        "Type `/eth <name>` to find the oldest tokens with active LP.\n\n"
-        "*Examples:*\n`/eth pepe`\n`/eth shiba`\n`/eth wojak`",
-        parse_mode=ParseMode.MARKDOWN,
-    )
+        "Type `/eth <name>` to find the oldest tokens with active LP.\n"
+        "Add `v2` `v3` or `v4` to filter by DEX.\n\n"
+        "*Examples:*\n`/eth pepe`\n`/eth pepe v2`\n`/eth shiba v3`",
+        parse_mode=ParseMode.MARKDOWN)
 
-async def eth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def eth_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         await update.message.reply_text("⛔ You are not authorized.\nContact the admin @glokenn to get access.")
         return
     if not context.args:
         await update.message.reply_text("⚠️ Usage: `/eth <token name>`\nExample: `/eth pepe`", parse_mode=ParseMode.MARKDOWN)
         return
-    args    = context.args
-    # Check for dex filter at end e.g. "/eth pepe v2"
+    args = list(context.args)
     dex_filter = None
-    if args and args[-1].lower() in ("v2","v3","v4"):
-        dex_filter = args[-1].lower()
-        args = args[:-1]
-    query   = " ".join(args).strip()
+    if args[-1].lower() in ("v2","v3","v4"):
+        dex_filter = args.pop().lower()
+    query = " ".join(args).strip()
     if not query:
         await update.message.reply_text("⚠️ Usage: `/eth <token name>`\nExample: `/eth pepe`", parse_mode=ParseMode.MARKDOWN)
         return
-    filter_txt = f" (Uniswap {dex_filter.upper()} only)" if dex_filter else ""
-    loading = await update.message.reply_text(f"🔍 Searching ETH for *{query}*{filter_txt}...", parse_mode=ParseMode.MARKDOWN)
+    ftxt = f" ({dex_name('uniswap-'+dex_filter)} only)" if dex_filter else ""
+    loading = await update.message.reply_text(f"🔍 Searching ETH for *{query}*{ftxt}...", parse_mode=ParseMode.MARKDOWN)
     try:
-        data, error = await asyncio.get_event_loop().run_in_executor(None, find_og_tokens_eth, query, dex_filter)
-        if error:
-            await loading.edit_text(error, parse_mode=ParseMode.MARKDOWN)
+        data, err = await asyncio.get_event_loop().run_in_executor(None, find_tokens, query, dex_filter)
+        if err:
+            await loading.edit_text(err, parse_mode=ParseMode.MARKDOWN)
             return
-        results = data["results"]
-        total   = data["total"]
-        blocks  = [build_token_block(pair, ts, info, ath, tax)
-                   for _, pair, ts, info, ath, tax in results]
-        sep    = "\n➖➖➖➖➖➖➖➖➖➖\n"
-        footer = f"\n\n📊 Showing {len(results)}/{total} results"
-        await loading.edit_text(sep.join(blocks) + footer, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+        res = data["results"]; tot = data["total"]
+        blocks = [build_msg(pair, ts, info, ath, tax) for _, pair, ts, info, ath, tax in res]
+        sep = "\n➖➖➖➖➖➖➖➖➖➖\n"
+        await loading.edit_text(sep.join(blocks) + f"\n\n📊 Showing {len(res)}/{tot} results",
+            parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
     except Exception as e:
-        logger.error(f"eth_command error: {e}")
+        logger.error(f"eth_cmd: {e}")
         await loading.edit_text("⚠️ Something went wrong. Please try again.")
 
-async def allow_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
+async def allow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID: return
     if not context.args:
-        await update.message.reply_text("Usage: `/allow <user_id>`", parse_mode=ParseMode.MARKDOWN)
-        return
+        await update.message.reply_text("Usage: `/allow <user_id>`", parse_mode=ParseMode.MARKDOWN); return
     try:
-        uid = int(context.args[0])
-        whitelist.add(uid)
+        uid = int(context.args[0]); whitelist.add(uid)
         await update.message.reply_text(f"✅ User `{uid}` added.", parse_mode=ParseMode.MARKDOWN)
-    except ValueError:
-        await update.message.reply_text("⚠️ Invalid user ID.")
+    except: await update.message.reply_text("⚠️ Invalid user ID.")
 
-async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
+async def remove_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID: return
     if not context.args:
-        await update.message.reply_text("Usage: `/remove <user_id>`", parse_mode=ParseMode.MARKDOWN)
-        return
+        await update.message.reply_text("Usage: `/remove <user_id>`", parse_mode=ParseMode.MARKDOWN); return
     try:
-        uid = int(context.args[0])
-        whitelist.discard(uid)
+        uid = int(context.args[0]); whitelist.discard(uid)
         await update.message.reply_text(f"✅ User `{uid}` removed.", parse_mode=ParseMode.MARKDOWN)
-    except ValueError:
-        await update.message.reply_text("⚠️ Invalid user ID.")
+    except: await update.message.reply_text("⚠️ Invalid user ID.")
 
-async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
+async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID: return
     if not whitelist:
-        await update.message.reply_text("📋 Whitelist is empty. Only you can use the bot.")
-        return
-    users = "\n".join([f"`{uid}`" for uid in whitelist])
-    await update.message.reply_text(f"📋 *Whitelisted users:*\n{users}", parse_mode=ParseMode.MARKDOWN)
-
-# ─── Main ─────────────────────────────────────────────────────────────────────
+        await update.message.reply_text("📋 Whitelist is empty. Only you can use the bot."); return
+    await update.message.reply_text(f"📋 *Whitelisted:*\n" + "\n".join(f"`{u}`" for u in whitelist), parse_mode=ParseMode.MARKDOWN)
 
 def main():
     if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        raise ValueError("Set TELEGRAM_BOT_TOKEN environment variable!")
+        raise ValueError("Set TELEGRAM_BOT_TOKEN!")
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start",  start))
-    app.add_handler(CommandHandler("eth",    eth_command))
-    app.add_handler(CommandHandler("allow",  allow_user))
-    app.add_handler(CommandHandler("remove", remove_user))
-    app.add_handler(CommandHandler("users",  list_users))
+    app.add_handler(CommandHandler("eth",    eth_cmd))
+    app.add_handler(CommandHandler("allow",  allow_cmd))
+    app.add_handler(CommandHandler("remove", remove_cmd))
+    app.add_handler(CommandHandler("users",  users_cmd))
     logger.info("🚀 OG Token Bot running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
