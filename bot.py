@@ -218,6 +218,20 @@ def find_tokens(name, dex_filter=None):
         ds = [p for p in ds if dex_matches_filter(p.get("dexId",""), dex_filter)]
         gt = [p for p in gt if dex_matches_filter(p.get("dexId",""), dex_filter)]
 
+    # Run extra searches with different query variations to catch missed tokens
+    nl = name.lower().strip()
+    for extra_q in [f"{name} token", f"{name} coin"]:
+        try:
+            r2 = requests.get(f"https://api.dexscreener.com/latest/dex/search?q={extra_q}", timeout=10)
+            r2.raise_for_status()
+            extra = [p for p in (r2.json().get("pairs") or [])
+                     if p.get("chainId","").lower() == "ethereum"
+                     and (p.get("baseToken",{}).get("symbol","").lower() == nl
+                          or nl in p.get("baseToken",{}).get("name","").lower())]
+            ds.extend(extra)
+        except:
+            pass
+
     if not ds and not gt:
         return None, f"No tokens found with the name *{name}* on ETH."
 
