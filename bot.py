@@ -245,6 +245,11 @@ def find_og_tokens_eth(name: str, dex_filter: str = None):
     if not ds_pairs and not gt_pairs:
         return None, f"No tokens found with the name *{name}* on ETH."
 
+    # Apply dex filter FIRST before deduplication
+    if dex_filter:
+        ds_pairs = [p for p in ds_pairs if dex_filter in p.get("dexId","").lower()]
+        gt_pairs = [p for p in gt_pairs if dex_filter in p.get("dexId","").lower()]
+
     # Prefer DexScreener (has pairCreatedAt), add GeckoTerminal only for new CAs
     token_map = {}
     for p in ds_pairs:
@@ -260,11 +265,6 @@ def find_og_tokens_eth(name: str, dex_filter: str = None):
 
     liquid = {a: p for a, p in token_map.items()
               if float((p.get("liquidity") or {}).get("usd") or 0) >= 400}
-
-    # Apply dex filter if specified
-    if dex_filter:
-        liquid = {a: p for a, p in liquid.items()
-                  if dex_filter in p.get("dexId","").lower()}
 
     if not liquid:
         return None, f"Found *{name}* on ETH but none have active LP (liquidity > $400)."
@@ -289,7 +289,14 @@ def build_token_block(pair, ts, info, ath, tax) -> str:
     name      = base.get("name","Unknown")
     symbol    = base.get("symbol","?")
     addr      = base.get("address","")
-    dex       = pair.get("dexId","Unknown").replace("-"," ").title()
+    dex_raw   = pair.get("dexId","Unknown").lower()
+    if "uniswap-v4" in dex_raw:   dex = "Uniswap V4"
+    elif "uniswap-v3" in dex_raw: dex = "Uniswap V3"
+    elif "uniswap-v2" in dex_raw: dex = "Uniswap V2"
+    elif "uniswap" in dex_raw:    dex = "Uniswap"
+    elif "sushiswap" in dex_raw:  dex = "SushiSwap"
+    elif "pancakeswap" in dex_raw: dex = "PancakeSwap"
+    else: dex = dex_raw.replace("-"," ").title()
     pair_addr = pair.get("pairAddress", addr)
     mc        = pair.get("fdv")
     liq       = pair.get("liquidity") or {}
