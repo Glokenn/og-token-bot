@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ETHERSCAN_API_KEY  = os.getenv("ETHERSCAN_API_KEY",  "YOUR_ETHERSCAN_KEY")
 
-MAX_RESULTS = 5
+MAX_RESULTS = 10
 OWNER_ID    = 7525750969
 whitelist   = set()
 
@@ -78,13 +78,19 @@ def search_dexscreener(name):
 
 def search_geckoterminal(name):
     try:
-        r = requests.get("https://api.geckoterminal.com/api/v2/search/pools",
-            params={"query": name, "network": "eth", "page": 1},
-            headers={"Accept": "application/json;version=20230302"}, timeout=10)
-        r.raise_for_status()
         nl = name.lower().strip()
+        all_pools = []
+        for page in [1, 2]:
+            try:
+                r = requests.get("https://api.geckoterminal.com/api/v2/search/pools",
+                    params={"query": name, "network": "eth", "page": page},
+                    headers={"Accept": "application/json;version=20230302"}, timeout=10)
+                r.raise_for_status()
+                all_pools.extend(r.json().get("data") or [])
+            except:
+                pass
         out = []
-        for pool in (r.json().get("data") or []):
+        for pool in all_pools:
             a = pool.get("attributes", {})
             sym = a.get("base_token_symbol", "").lower()
             pn  = a.get("name", "").lower()
