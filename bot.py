@@ -235,7 +235,7 @@ def fetch_token_data(addr: str, pair: dict):
     tax       = get_tax_info(addr)
     return addr, pair, ts, info, ath, tax
 
-def find_og_tokens_eth(name: str):
+def find_og_tokens_eth(name: str, dex_filter: str = None):
     with ThreadPoolExecutor(max_workers=2) as pool:
         f1 = pool.submit(dexscreener_search, name)
         f2 = pool.submit(geckoterminal_search, name)
@@ -259,10 +259,15 @@ def find_og_tokens_eth(name: str):
         token_map[addr] = p
 
     liquid = {a: p for a, p in token_map.items()
-              if float((p.get("liquidity") or {}).get("usd") or 0) >= 500}
+              if float((p.get("liquidity") or {}).get("usd") or 0) >= 400}
+
+    # Apply dex filter if specified
+    if dex_filter:
+        liquid = {a: p for a, p in liquid.items()
+                  if dex_filter in p.get("dexId","").lower()}
 
     if not liquid:
-        return None, f"Found *{name}* on ETH but none have active LP (liquidity > $500)."
+        return None, f"Found *{name}* on ETH but none have active LP (liquidity > $400)."
 
     total = len(liquid)
     results = []
@@ -349,10 +354,20 @@ async def eth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("⚠️ Usage: `/eth <token name>`\nExample: `/eth pepe`", parse_mode=ParseMode.MARKDOWN)
         return
-    query   = " ".join(context.args).strip()
-    loading = await update.message.reply_text(f"🔍 Searching ETH for *{query}*...", parse_mode=ParseMode.MARKDOWN)
+    args    = context.args
+    # Check for dex filter at end e.g. "/eth pepe v2"
+    dex_filter = None
+    if args and args[-1].lower() in ("v2","v3","v4"):
+        dex_filter = args[-1].lower()
+        args = args[:-1]
+    query   = " ".join(args).strip()
+    if not query:
+        await update.message.reply_text("⚠️ Usage: `/eth <token name>`\nExample: `/eth pepe`", parse_mode=ParseMode.MARKDOWN)
+        return
+    filter_txt = f" (Uniswap {dex_filter.upper()} only)" if dex_filter else ""
+    loading = await update.message.reply_text(f"🔍 Searching ETH for *{query}*{filter_txt}...", parse_mode=ParseMode.MARKDOWN)
     try:
-        data, error = await asyncio.get_event_loop().run_in_executor(None, find_og_tokens_eth, query)
+        data, error = await asyncio.get_event_loop().run_in_executor(None, find_og_tokens_eth, query, dex_filter)
         if error:
             await loading.edit_text(error, parse_mode=ParseMode.MARKDOWN)
             return
