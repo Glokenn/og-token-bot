@@ -247,8 +247,18 @@ def find_og_tokens_eth(name: str, dex_filter: str = None):
 
     # Apply dex filter FIRST before deduplication
     if dex_filter:
-        ds_pairs = [p for p in ds_pairs if dex_filter in p.get("dexId","").lower()]
-        gt_pairs = [p for p in gt_pairs if dex_filter in p.get("dexId","").lower()]
+        def dex_matches(dex_id, filt):
+            dex_id = dex_id.lower()
+            # DexScreener uses "uniswap" for V2, "uniswap_v3" or "uniswap-v3" for V3
+            if filt == "v2":
+                return dex_id == "uniswap" or "v2" in dex_id
+            elif filt == "v3":
+                return "v3" in dex_id
+            elif filt == "v4":
+                return "v4" in dex_id
+            return True
+        ds_pairs = [p for p in ds_pairs if dex_matches(p.get("dexId",""), dex_filter)]
+        gt_pairs = [p for p in gt_pairs if dex_matches(p.get("dexId",""), dex_filter)]
 
     # Prefer DexScreener (has pairCreatedAt), add GeckoTerminal only for new CAs
     token_map = {}
@@ -290,10 +300,9 @@ def build_token_block(pair, ts, info, ath, tax) -> str:
     symbol    = base.get("symbol","?")
     addr      = base.get("address","")
     dex_raw   = pair.get("dexId","Unknown").lower()
-    if "uniswap-v4" in dex_raw:   dex = "Uniswap V4"
-    elif "uniswap-v3" in dex_raw: dex = "Uniswap V3"
-    elif "uniswap-v2" in dex_raw: dex = "Uniswap V2"
-    elif "uniswap" in dex_raw:    dex = "Uniswap"
+    if "v4" in dex_raw and "uniswap" in dex_raw:   dex = "Uniswap V4"
+    elif "v3" in dex_raw and "uniswap" in dex_raw:  dex = "Uniswap V3"
+    elif dex_raw == "uniswap" or ("v2" in dex_raw and "uniswap" in dex_raw): dex = "Uniswap V2"
     elif "sushiswap" in dex_raw:  dex = "SushiSwap"
     elif "pancakeswap" in dex_raw: dex = "PancakeSwap"
     else: dex = dex_raw.replace("-"," ").title()
