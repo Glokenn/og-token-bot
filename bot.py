@@ -220,6 +220,40 @@ def get_tax(addr):
     except:
         return "N/A"
 
+# ─── LP Status (GoPlus) ────────────────────────────────────────────────────────
+
+def get_lp_status(addr):
+    """Check LP burned/locked using GoPlus free API."""
+    try:
+        r = requests.get(
+            f"https://api.gopluslabs.com/api/v1/token_security/1?contract_addresses={addr}",
+            timeout=6)
+        r.raise_for_status()
+        data = r.json().get("result", {}).get(addr.lower(), {})
+        lp_holders = data.get("lp_holders") or []
+        burned = False
+        locked = False
+        burn_pct = 0
+        lock_pct = 0
+        dead_addrs = {"0x000000000000000000000000000000000000dead", "0x0000000000000000000000000000000000000000"}
+        for h in lp_holders:
+            pct = float(h.get("percent", 0)) * 100
+            if h.get("address", "").lower() in dead_addrs:
+                burned = True
+                burn_pct += pct
+            if h.get("is_locked", 0) == 1:
+                locked = True
+                lock_pct += pct
+        if burned:
+            return f"🔥 {burn_pct:.0f}% Burned"
+        elif locked:
+            return f"🔒 {lock_pct:.0f}% Locked"
+        elif lp_holders:
+            return "🔓 Not Burned"
+        return "N/A"
+    except:
+        return "N/A"
+
 # ─── Core ─────────────────────────────────────────────────────────────────────
 
 def fetch_one(addr, pair):
@@ -227,7 +261,8 @@ def fetch_one(addr, pair):
     info      = get_socials(addr)
     ath, gdex = get_ath_and_dex(pair)
     tax       = get_tax(addr)
-    return addr, pair, ts, info, ath, tax, gdex
+    lp        = get_lp_status(addr)
+    return addr, pair, ts, info, ath, tax, gdex, lp
 
 def find_tokens(name, dex_filter=None):
     with ThreadPoolExecutor(max_workers=2) as p:
@@ -289,7 +324,7 @@ def find_tokens(name, dex_filter=None):
 
 # ─── Message ──────────────────────────────────────────────────────────────────
 
-def build_msg(pair, ts, info, ath, tax, gdex=None):
+def build_msg(pair, ts, info, ath, tax, gdex=None, lp="N/A"):
     b     = pair.get("baseToken",{})
     name  = b.get("name","Unknown")
     sym   = b.get("symbol","?")
@@ -315,12 +350,14 @@ def build_msg(pair, ts, info, ath, tax, gdex=None):
         if u: sp.append(f'🌐 [{(w.get("label") or "Website").title()}]({u})')
     soc = " | ".join(sp) if sp else "No socials available"
     tl = "🚨 *HONEYPOT — DO NOT BUY*" if tax == "HONEYPOT" else f"💸 Tax: {tax}"
+    lp_line = f"🔥 LP: {lp}"
     return (
         f"✅ *{name}* ({sym}) ⏳ {age(ts)}  📡\n"
         f"`{addr}`\n\n"
         f"💰 MC: {fmt(mc)} | 🚀 ATH MC: {ath} | 🏦 LP: {lp} | 🏷️ {dex}\n"
         f"📊 Tx 24h: {tx.get('buys',0)}B/{tx.get('sells',0)}S | 🔊 Vol 5m: {fmt(vol.get('m5'))}\n"
-        f"{tl}\n\n"
+        f"{tl}\n"
+        f"{lp_line}\n\n"
         f"Socials: {soc}\n\n"
         f"🔗 [DexT](https://www.dextools.io/app/en/ether/pair-explorer/{pa}) • "
         f"[DexS](https://dexscreener.com/ethereum/{pa}) • "
@@ -368,7 +405,7 @@ async def eth_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await loading.edit_text(err, parse_mode=ParseMode.MARKDOWN)
             return
         res = data["results"]; tot = data["total"]
-        blocks = [build_msg(pair, ts, info, ath, tax, gdex) for _, pair, ts, info, ath, tax, gdex in res]
+        blocks = [build_msg(pair, ts, info, ath, tax, gdex, lp) for _, pair, ts, info, ath, tax, gdex, lp in res]
         sep = "\n➖➖➖➖➖➖➖➖➖➖\n"
         await loading.edit_text(sep.join(blocks) + f"\n\n📊 Showing {len(res)}/{tot} results",
             parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
