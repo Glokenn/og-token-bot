@@ -229,8 +229,16 @@ def get_lp_status(addr):
             f"https://api.gopluslabs.com/api/v1/token_security/1?contract_addresses={addr}",
             timeout=6)
         r.raise_for_status()
-        data = r.json().get("result", {}).get(addr.lower(), {})
+        resp = r.json()
+        logger.info(f"GoPlus keys for {addr[:10]}: {list(resp.get('result',{}).keys())}")
+        data = resp.get("result", {}).get(addr.lower(), {})
+        if not data:
+            # Try with original case
+            for k, v in resp.get("result", {}).items():
+                data = v
+                break
         lp_holders = data.get("lp_holders") or []
+        logger.info(f"GoPlus lp_holders count for {addr[:10]}: {len(lp_holders)}")
         burned = False
         locked = False
         burn_pct = 0
@@ -251,7 +259,8 @@ def get_lp_status(addr):
         elif lp_holders:
             return "🔓 Not Burned"
         return "N/A"
-    except:
+    except Exception as e:
+        logger.error(f"GoPlus error for {addr[:10]}: {e}")
         return "N/A"
 
 # ─── Core ─────────────────────────────────────────────────────────────────────
