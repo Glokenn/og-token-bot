@@ -66,7 +66,7 @@ def dex_name(dex_id, gt_dex=None, onchain_dex=None):
     if "v3" in d and "uniswap" in d: return "Uniswap V3"
     if "v2" in d and "uniswap" in d: return "Uniswap V2"
     # DON'T assume bare "uniswap" = V2 — leave it unversioned
-    if d == "uniswap":               return "Uniswap"
+    if d == "uniswap":               return "Uniswap V2"
     if "sushiswap" in d:  return "SushiSwap"
     if "pancakeswap" in d: return "PancakeSwap"
     if d == "unknown":    return "Unknown DEX"
