@@ -18,6 +18,8 @@ MAX_RESULTS = 10
 OWNER_ID    = 7525750969
 whitelist   = set()
 
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+
 def is_allowed(uid): return uid == OWNER_ID or uid in whitelist
 
 def fmt(n):
@@ -32,28 +34,25 @@ def fmt(n):
 def age(ts):
     if not ts: return "Unknown"
     s = int((datetime.now(timezone.utc) - datetime.fromtimestamp(ts, tz=timezone.utc)).total_seconds())
-    y = s//(365*86400); s %= 365*86400
-    mo= s//(30*86400);  s %= 30*86400
-    d = s//86400;       s %= 86400
-    h = s//3600;        s %= 3600
-    m = s//60
-    p = []
-    if y:  p.append(f"{y}y")
+    y=s//(365*86400); s%=365*86400; mo=s//(30*86400); s%=30*86400
+    d=s//86400; s%=86400; h=s//3600; s%=3600; m=s//60
+    p=[]
+    if y: p.append(f"{y}y")
     if mo: p.append(f"{mo}mo")
-    if d:  p.append(f"{d}d")
-    if h:  p.append(f"{h}h")
+    if d: p.append(f"{d}d")
+    if h: p.append(f"{h}h")
     p.append(f"{m}m")
-    return " ".join(p) + " ago"
+    return " ".join(p)+" ago"
 
 def dex_name(dex_id, gt_dex=None):
     d = (gt_dex or dex_id or "unknown").lower()
     if "v4" in d and "uniswap" in d: return "Uniswap V4"
     if "v3" in d and "uniswap" in d: return "Uniswap V3"
     if "v2" in d and "uniswap" in d: return "Uniswap V2"
-    if d == "uniswap":               return "Uniswap V2"
-    if "sushiswap" in d:  return "SushiSwap"
+    if d == "uniswap": return "Uniswap V2"
+    if "sushiswap" in d: return "SushiSwap"
     if "pancakeswap" in d: return "PancakeSwap"
-    if d == "unknown":    return "Unknown DEX"
+    if d == "unknown": return "Unknown DEX"
     return d.replace("-"," ").replace("_"," ").title()
 
 def dex_matches_filter(dex_id, filt):
@@ -67,7 +66,7 @@ def dex_matches_filter(dex_id, filt):
 
 def search_dexscreener(name):
     try:
-        r = requests.get(f"https://api.dexscreener.com/latest/dex/search?q={name}", timeout=10)
+        r = requests.get(f"https://api.dexscreener.com/latest/dex/search?q={name}", headers=HEADERS, timeout=10)
         r.raise_for_status()
         nl = name.lower().strip()
         return [p for p in (r.json().get("pairs") or [])
@@ -89,20 +88,20 @@ def search_geckoterminal(name):
                     headers={"Accept": "application/json;version=20230302"}, timeout=10)
                 r.raise_for_status()
                 all_pools.extend(r.json().get("data") or [])
-            except:
-                pass
+            except: pass
         out = []
         for pool in all_pools:
             a = pool.get("attributes", {})
             sym = a.get("base_token_symbol", "").lower()
-            pn  = a.get("name", "").lower()
+            pn = a.get("name", "").lower()
             liq = float(a.get("reserve_in_usd") or 0)
             if liq < 400: continue
             if sym != nl and pn.split(" / ")[0].strip() != nl: continue
             ta = pool.get("relationships",{}).get("base_token",{}).get("data",{}).get("id","").replace("eth_","")
+            pa = a.get("address","")
             vol = a.get("volume_usd",{}) or {}
             out.append({
-                "chainId":"ethereum","pairAddress":a.get("address",""),
+                "chainId":"ethereum","pairAddress":pa,
                 "baseToken":{"address":ta,"symbol":sym.upper(),"name":pn.split(" / ")[0].strip().title()},
                 "quoteToken":{"symbol":"WETH"},"dexId":a.get("dex_id","unknown"),
                 "priceUsd":str(a.get("base_token_price_usd") or 0),"fdv":a.get("fdv_usd"),
@@ -125,6 +124,7 @@ def get_timestamp(addr, pair_created_ms):
             "module":"contract","action":"getcontractcreation",
             "contractaddresses":addr,"apikey":ETHERSCAN_API_KEY}, timeout=8)
         d = r.json()
+        bn = None
         if d.get("status")=="1" and d.get("result"):
             res = d["result"][0]
             bn = res.get("blockNumber")
@@ -135,15 +135,12 @@ def get_timestamp(addr, pair_created_ms):
                         "module":"proxy","action":"eth_getTransactionByHash",
                         "txhash":txh,"apikey":ETHERSCAN_API_KEY}, timeout=8)
                     bn = int(r2.json().get("result",{}).get("blockNumber","0x0"),16)
-            else:
-                bn = int(bn)
+            else: bn = int(bn)
             if bn:
                 r3 = requests.get("https://api.etherscan.io/api", params={
-                    "module":"block","action":"getblockreward",
-                    "blockno":bn,"apikey":ETHERSCAN_API_KEY}, timeout=8)
+                    "module":"block","action":"getblockreward","blockno":bn,"apikey":ETHERSCAN_API_KEY}, timeout=8)
                 ts = r3.json().get("result",{}).get("timeStamp")
                 if ts: return int(ts)
-        # Fallback: first tx
         r4 = requests.get("https://api.etherscan.io/api", params={
             "module":"account","action":"txlist","address":addr,
             "startblock":0,"endblock":99999999,"page":1,"offset":1,
@@ -153,38 +150,29 @@ def get_timestamp(addr, pair_created_ms):
             ts = txs[0].get("timeStamp")
             if ts: return int(ts)
     except Exception as e:
-        logger.error(f"Etherscan ts {addr}: {e}")
+        logger.error(f"Etherscan ts {addr[:10]}: {e}")
     return None
 
 def get_socials(addr):
     try:
-        r = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{addr}", timeout=6)
+        r = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{addr}", headers=HEADERS, timeout=6)
         r.raise_for_status()
         pairs = r.json().get("pairs") or []
         return pairs[0].get("info") or {} if pairs else {}
-    except:
-        return {}
+    except: return {}
 
 def get_ath_and_dex(pair):
-    """Returns (ath_mc_str, dex_version_str) from GeckoTerminal."""
     pa = pair.get("pairAddress","")
     ath_str = "N/A"
     dex_ver = None
-
-    # Get pool info for dex version
     if pa:
         try:
             r1 = requests.get(f"https://api.geckoterminal.com/api/v2/networks/eth/pools/{pa}",
                 headers={"Accept":"application/json;version=20230302"}, timeout=6)
             r1.raise_for_status()
-            pool_data = r1.json().get("data",{})
-            dex_id = pool_data.get("relationships",{}).get("dex",{}).get("data",{}).get("id","")
-            if dex_id:
-                dex_ver = dex_id
-        except:
-            pass
-
-    # Get ATH from OHLCV
+            dex_id = r1.json().get("data",{}).get("relationships",{}).get("dex",{}).get("data",{}).get("id","")
+            if dex_id: dex_ver = dex_id
+        except: pass
     try:
         cp = float(pair.get("priceUsd") or 0)
         fdv = float(pair.get("fdv") or 0)
@@ -196,16 +184,13 @@ def get_ath_and_dex(pair):
             ohlcv = r2.json().get("data",{}).get("attributes",{}).get("ohlcv_list",[])
             if ohlcv:
                 ath_p = max(e[2] for e in ohlcv)
-                if ath_p and cp > 0:
-                    ath_str = fmt((ath_p/cp)*fdv)
-    except:
-        pass
-
+                if ath_p and cp > 0: ath_str = fmt((ath_p/cp)*fdv)
+    except: pass
     return ath_str, dex_ver
 
 def get_tax(addr):
     try:
-        r = requests.get(f"https://api.honeypot.is/v2/IsHoneypot?address={addr}", timeout=6)
+        r = requests.get(f"https://api.honeypot.is/v2/IsHoneypot?address={addr}", headers=HEADERS, timeout=6)
         r.raise_for_status()
         d = r.json()
         if d.get("honeypotResult",{}).get("isHoneypot",False): return "HONEYPOT"
@@ -217,47 +202,34 @@ def get_tax(addr):
         be = "🟢" if (bt or 0)<=5 else "🟡" if (bt or 0)<=10 else "🔴"
         se = "🟢" if (st or 0)<=5 else "🟡" if (st or 0)<=10 else "🔴"
         return f"{be} Buy: {bs} | {se} Sell: {ss}"
-    except:
-        return "N/A"
-
-# ─── LP Status (GoPlus) ────────────────────────────────────────────────────────
+    except: return "N/A"
 
 def get_lp_status(addr):
-    """Check LP burned/locked using GoPlus free API."""
+    """Check LP burned/locked using GoPlus free API with browser headers."""
     try:
         r = requests.get(
             f"https://api.gopluslabs.com/api/v1/token_security/1?contract_addresses={addr}",
-            timeout=6)
+            headers=HEADERS, timeout=8)
         r.raise_for_status()
         resp = r.json()
-        logger.info(f"GoPlus keys for {addr[:10]}: {list(resp.get('result',{}).keys())}")
         data = resp.get("result", {}).get(addr.lower(), {})
         if not data:
-            # Try with original case
             for k, v in resp.get("result", {}).items():
                 data = v
                 break
         lp_holders = data.get("lp_holders") or []
-        logger.info(f"GoPlus lp_holders count for {addr[:10]}: {len(lp_holders)}")
-        burned = False
-        locked = False
-        burn_pct = 0
-        lock_pct = 0
-        dead_addrs = {"0x000000000000000000000000000000000000dead", "0x0000000000000000000000000000000000000000"}
+        logger.info(f"GoPlus LP holders for {addr[:10]}: {len(lp_holders)}")
+        dead = {"0x000000000000000000000000000000000000dead","0x0000000000000000000000000000000000000000"}
+        burned = False; locked = False; burn_pct = 0; lock_pct = 0
         for h in lp_holders:
             pct = float(h.get("percent", 0)) * 100
-            if h.get("address", "").lower() in dead_addrs:
-                burned = True
-                burn_pct += pct
+            if h.get("address","").lower() in dead:
+                burned = True; burn_pct += pct
             if h.get("is_locked", 0) == 1:
-                locked = True
-                lock_pct += pct
-        if burned:
-            return f"🔥 {burn_pct:.0f}% Burned"
-        elif locked:
-            return f"🔒 {lock_pct:.0f}% Locked"
-        elif lp_holders:
-            return "🔓 Not Burned"
+                locked = True; lock_pct += pct
+        if burned: return f"🔥 {burn_pct:.0f}% Burned"
+        if locked: return f"🔒 {lock_pct:.0f}% Locked"
+        if lp_holders: return "🔓 Not Burned"
         return "N/A"
     except Exception as e:
         logger.error(f"GoPlus error for {addr[:10]}: {e}")
@@ -270,8 +242,8 @@ def fetch_one(addr, pair):
     info      = get_socials(addr)
     ath, gdex = get_ath_and_dex(pair)
     tax       = get_tax(addr)
-    lp        = get_lp_status(addr)
-    return addr, pair, ts, info, ath, tax, gdex, lp
+    lp_st     = get_lp_status(addr)
+    return addr, pair, ts, info, ath, tax, gdex, lp_st
 
 def find_tokens(name, dex_filter=None):
     with ThreadPoolExecutor(max_workers=2) as p:
@@ -280,29 +252,25 @@ def find_tokens(name, dex_filter=None):
         ds = f1.result()
         gt = f2.result()
 
-    # Filter by dex FIRST
-    if dex_filter:
-        ds = [p for p in ds if dex_matches_filter(p.get("dexId",""), dex_filter)]
-        gt = [p for p in gt if dex_matches_filter(p.get("dexId",""), dex_filter)]
-
-    # Run extra searches with different query variations to catch missed tokens
     nl = name.lower().strip()
     for extra_q in [f"{name} token", f"{name} coin"]:
         try:
-            r2 = requests.get(f"https://api.dexscreener.com/latest/dex/search?q={extra_q}", timeout=10)
+            r2 = requests.get(f"https://api.dexscreener.com/latest/dex/search?q={extra_q}", headers=HEADERS, timeout=10)
             r2.raise_for_status()
             extra = [p for p in (r2.json().get("pairs") or [])
                      if p.get("chainId","").lower() == "ethereum"
                      and (p.get("baseToken",{}).get("symbol","").lower() == nl
                           or p.get("baseToken",{}).get("name","").lower() == nl)]
             ds.extend(extra)
-        except:
-            pass
+        except: pass
+
+    if dex_filter:
+        ds = [p for p in ds if dex_matches_filter(p.get("dexId",""), dex_filter)]
+        gt = [p for p in gt if dex_matches_filter(p.get("dexId",""), dex_filter)]
 
     if not ds and not gt:
         return None, f"No tokens found with the name *{name}* on ETH."
 
-    # Deduplicate: prefer DexScreener
     tmap = {}
     for p in ds:
         a = p.get("baseToken",{}).get("address","").lower()
@@ -316,7 +284,6 @@ def find_tokens(name, dex_filter=None):
         tmap[a] = p
 
     liquid = {a:p for a,p in tmap.items() if float((p.get("liquidity") or {}).get("usd") or 0) >= 400}
-
     if not liquid:
         return None, f"Found *{name}* on ETH but none have active LP (liquidity > $400)."
 
@@ -334,24 +301,20 @@ def find_tokens(name, dex_filter=None):
 # ─── Message ──────────────────────────────────────────────────────────────────
 
 def build_msg(pair, ts, info, ath, tax, gdex=None, lp_status="N/A"):
-    b     = pair.get("baseToken",{})
-    name  = b.get("name","Unknown")
-    sym   = b.get("symbol","?")
-    addr  = b.get("address","")
-    dex   = dex_name(pair.get("dexId","Unknown"), gdex)
-    pa    = pair.get("pairAddress", addr)
-    mc    = pair.get("fdv")
-    liq   = pair.get("liquidity") or {}
-    lq    = liq.get("quote")
-    qs    = (pair.get("quoteToken") or {}).get("symbol","")
-    lp    = f"{float(lq):.2f} {qs.upper()}" if lq and qs.upper() in ("WETH","ETH") else f"${fmt(liq.get('usd'))}"
-    tx    = (pair.get("txns") or {}).get("h24") or {}
-    vol   = pair.get("volume") or {}
+    b = pair.get("baseToken",{})
+    name = b.get("name","Unknown"); sym = b.get("symbol","?"); addr = b.get("address","")
+    dex = dex_name(pair.get("dexId","Unknown"), gdex)
+    pa = pair.get("pairAddress", addr); mc = pair.get("fdv")
+    liq = pair.get("liquidity") or {}; lq = liq.get("quote")
+    qs = (pair.get("quoteToken") or {}).get("symbol","")
+    lp = f"{float(lq):.2f} {qs.upper()}" if lq and qs.upper() in ("WETH","ETH") else f"${fmt(liq.get('usd'))}"
+    tx = (pair.get("txns") or {}).get("h24") or {}
+    vol = pair.get("volume") or {}
     sp = []
     for s in (info.get("socials") or []):
         t = (s.get("type") or "").lower(); u = s.get("url","")
         if not u: continue
-        if t == "twitter":    sp.append(f'🐦 [X]({u})')
+        if t == "twitter": sp.append(f'🐦 [X]({u})')
         elif t == "telegram": sp.append(f'✈️ [Telegram]({u})')
         else: sp.append(f'🔗 [{t.title()}]({u})')
     for w in (info.get("websites") or []):
@@ -359,14 +322,13 @@ def build_msg(pair, ts, info, ath, tax, gdex=None, lp_status="N/A"):
         if u: sp.append(f'🌐 [{(w.get("label") or "Website").title()}]({u})')
     soc = " | ".join(sp) if sp else "No socials available"
     tl = "🚨 *HONEYPOT — DO NOT BUY*" if tax == "HONEYPOT" else f"💸 Tax: {tax}"
-    lp_line = f"🔥 LP: {lp_status}"
     return (
         f"✅ *{name}* ({sym}) ⏳ {age(ts)}  📡\n"
         f"`{addr}`\n\n"
         f"💰 MC: {fmt(mc)} | 🚀 ATH MC: {ath} | 🏦 LP: {lp} | 🏷️ {dex}\n"
         f"📊 Tx 24h: {tx.get('buys',0)}B/{tx.get('sells',0)}S | 🔊 Vol 5m: {fmt(vol.get('m5'))}\n"
         f"{tl}\n"
-        f"{lp_line}\n\n"
+        f"🔥 LP: {lp_status}\n\n"
         f"Socials: {soc}\n\n"
         f"🔗 [DexT](https://www.dextools.io/app/en/ether/pair-explorer/{pa}) • "
         f"[DexS](https://dexscreener.com/ethereum/{pa}) • "
@@ -386,7 +348,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "👋 *OG Token Finder — ETH*\n\n"
-        "Type `/eth <name>` to find the oldest tokens with active LP.\n"
+        "Type `/eth <n>` to find the oldest tokens with active LP.\n"
         "Add `v2` `v3` or `v4` to filter by DEX.\n\n"
         "*Examples:*\n`/eth pepe`\n`/eth pepe v2`\n`/eth shiba v3`",
         parse_mode=ParseMode.MARKDOWN)
@@ -414,7 +376,8 @@ async def eth_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await loading.edit_text(err, parse_mode=ParseMode.MARKDOWN)
             return
         res = data["results"]; tot = data["total"]
-        blocks = [build_msg(pair, ts, info, ath, tax, gdex, lp_status) for _, pair, ts, info, ath, tax, gdex, lp_status in res]
+        blocks = [build_msg(pair, ts, info, ath, tax, gdex, lp_status)
+                  for _, pair, ts, info, ath, tax, gdex, lp_status in res]
         sep = "\n➖➖➖➖➖➖➖➖➖➖\n"
         await loading.edit_text(sep.join(blocks) + f"\n\n📊 Showing {len(res)}/{tot} results",
             parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
@@ -444,17 +407,17 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
     if not whitelist:
         await update.message.reply_text("📋 Whitelist is empty. Only you can use the bot."); return
-    await update.message.reply_text(f"📋 *Whitelisted:*\n" + "\n".join(f"`{u}`" for u in whitelist), parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"📋 *Whitelisted:*\n"+"\n".join(f"`{u}`" for u in whitelist), parse_mode=ParseMode.MARKDOWN)
 
 def main():
     if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         raise ValueError("Set TELEGRAM_BOT_TOKEN!")
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",  start))
-    app.add_handler(CommandHandler("eth",    eth_cmd))
-    app.add_handler(CommandHandler("allow",  allow_cmd))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("eth", eth_cmd))
+    app.add_handler(CommandHandler("allow", allow_cmd))
     app.add_handler(CommandHandler("remove", remove_cmd))
-    app.add_handler(CommandHandler("users",  users_cmd))
+    app.add_handler(CommandHandler("users", users_cmd))
     logger.info("🚀 OG Token Bot running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
