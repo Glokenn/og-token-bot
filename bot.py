@@ -18,6 +18,17 @@ MAX_RESULTS = 10
 OWNER_ID    = 7525750969
 whitelist   = set()
 
+# ─── On-chain factory addresses (ground truth for DEX identification) ─────────
+KNOWN_FACTORIES = {
+    "0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f": "Uniswap V2",
+    "0x1f98431c8ad98523631ae4a59f267346ea31f984": "Uniswap V3",
+    "0xc0aee478e3658e2610c5f7a4a2e1777ce9e4f2ac": "SushiSwap",
+    "0x1097053fd2ea711dad45caccc45eff7548fcb362": "PancakeSwap V2",
+    "0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865": "PancakeSwap V3",
+    "0x8909dc15e40173ff4699343b6eb8132c65e18ec6": "Uniswap V4",
+    "0x04625b046c69577ef69e58e2e50ccbf5f1bc584c": "Uniswap V4",
+}
+
 def is_allowed(uid): return uid == OWNER_ID or uid in whitelist
 
 def fmt(n):
@@ -45,12 +56,17 @@ def age(ts):
     p.append(f"{m}m")
     return " ".join(p) + " ago"
 
-def dex_name(dex_id, gt_dex=None):
+def dex_name(dex_id, gt_dex=None, onchain_dex=None):
+    """Resolve DEX name. Priority: on-chain > GeckoTerminal > DexScreener."""
+    # On-chain is ground truth — if we have it, use it
+    if onchain_dex:
+        return onchain_dex
     d = (gt_dex or dex_id or "unknown").lower()
     if "v4" in d and "uniswap" in d: return "Uniswap V4"
     if "v3" in d and "uniswap" in d: return "Uniswap V3"
     if "v2" in d and "uniswap" in d: return "Uniswap V2"
-    if d == "uniswap":               return "Uniswap V2"
+    # DON'T assume bare "uniswap" = V2 — leave it unversioned
+    if d == "uniswap":               return "Uniswap"
     if "sushiswap" in d:  return "SushiSwap"
     if "pancakeswap" in d: return "PancakeSwap"
     if d == "unknown":    return "Unknown DEX"
@@ -62,6 +78,33 @@ def dex_matches_filter(dex_id, filt):
     if filt == "v3": return "v3" in d
     if filt == "v4": return "v4" in d
     return True
+
+# ─── On-chain DEX detection ──────────────────────────────────────────────────
+
+def detect_dex_onchain(pair_address):
+    """Call factory() on the pair/pool contract and match against known factories.
+    This is the most reliable way to identify which DEX a pool belongs to."""
+    if not pair_address:
+        return None
+    try:
+        # factory() selector = 0xc45a0155  (used by both V2 pairs and V3 pools)
+        r = requests.get("https://api.etherscan.io/api", params={
+            "module": "proxy", "action": "eth_call",
+            "to": pair_address, "data": "0xc45a0155",
+            "tag": "latest", "apikey": ETHERSCAN_API_KEY
+        }, timeout=8)
+        result = r.json().get("result", "")
+        if result and result not in ("0x", "0x0") and len(result) >= 66:
+            factory_addr = "0x" + result[-40:].lower()
+            match = KNOWN_FACTORIES.get(factory_addr)
+            if match:
+                logger.info(f"On-chain DEX for {pair_address}: {match} (factory {factory_addr})")
+                return match
+            else:
+                logger.info(f"Unknown factory {factory_addr} for pair {pair_address}")
+    except Exception as e:
+        logger.debug(f"On-chain DEX detection failed for {pair_address}: {e}")
+    return None
 
 # ─── Search ───────────────────────────────────────────────────────────────────
 
@@ -117,33 +160,80 @@ def search_geckoterminal(name):
 
 # ─── Data fetchers ────────────────────────────────────────────────────────────
 
-def get_timestamp(addr, pair_created_ms):
+def get_timestamp(addr, pair_created_ms, pair_address=None, gt_created_at=None):
+    """Resolve pair creation time. Priority:
+    1. DexScreener pairCreatedAt
+    2. GeckoTerminal pool_created_at
+    3. Etherscan contract creation
+    4. Etherscan first event log on the pair
+    5. Etherscan first tx on the token contract
+    """
+    # 1) DexScreener
     if pair_created_ms:
         return int(pair_created_ms) // 1000
-    try:
-        r = requests.get("https://api.etherscan.io/api", params={
-            "module":"contract","action":"getcontractcreation",
-            "contractaddresses":addr,"apikey":ETHERSCAN_API_KEY}, timeout=8)
-        d = r.json()
-        if d.get("status")=="1" and d.get("result"):
-            res = d["result"][0]
-            bn = res.get("blockNumber")
-            if not bn:
-                txh = res.get("txHash")
-                if txh:
+
+    # 2) GeckoTerminal pool_created_at (ISO string from pool endpoint)
+    if gt_created_at:
+        try:
+            dt = datetime.fromisoformat(gt_created_at.replace("Z", "+00:00"))
+            return int(dt.timestamp())
+        except:
+            pass
+
+    # 3) Etherscan contract creation (for the PAIR address first, then token)
+    for target in ([pair_address, addr] if pair_address else [addr]):
+        if not target:
+            continue
+        try:
+            r = requests.get("https://api.etherscan.io/api", params={
+                "module":"contract","action":"getcontractcreation",
+                "contractaddresses":target,"apikey":ETHERSCAN_API_KEY}, timeout=8)
+            d = r.json()
+            if d.get("status")=="1" and d.get("result"):
+                res = d["result"][0]
+                bn = res.get("blockNumber")
+                if not bn:
+                    txh = res.get("txHash")
+                    if txh:
+                        r2 = requests.get("https://api.etherscan.io/api", params={
+                            "module":"proxy","action":"eth_getTransactionByHash",
+                            "txhash":txh,"apikey":ETHERSCAN_API_KEY}, timeout=8)
+                        bn = int(r2.json().get("result",{}).get("blockNumber","0x0"),16)
+                else:
+                    bn = int(bn)
+                if bn:
+                    r3 = requests.get("https://api.etherscan.io/api", params={
+                        "module":"block","action":"getblockreward",
+                        "blockno":bn,"apikey":ETHERSCAN_API_KEY}, timeout=8)
+                    ts = r3.json().get("result",{}).get("timeStamp")
+                    if ts: return int(ts)
+        except Exception as e:
+            logger.debug(f"Etherscan contract creation {target}: {e}")
+
+    # 4) First event log on the pair contract (catches internal-tx deploys)
+    if pair_address:
+        try:
+            r = requests.get("https://api.etherscan.io/api", params={
+                "module":"logs","action":"getLogs",
+                "address":pair_address,
+                "fromBlock":0,"toBlock":"latest",
+                "page":1,"offset":1,
+                "apikey":ETHERSCAN_API_KEY}, timeout=8)
+            logs = r.json().get("result") or []
+            if isinstance(logs, list) and logs:
+                block_hex = logs[0].get("blockNumber","0x0")
+                block_num = int(block_hex, 16) if block_hex.startswith("0x") else int(block_hex)
+                if block_num:
                     r2 = requests.get("https://api.etherscan.io/api", params={
-                        "module":"proxy","action":"eth_getTransactionByHash",
-                        "txhash":txh,"apikey":ETHERSCAN_API_KEY}, timeout=8)
-                    bn = int(r2.json().get("result",{}).get("blockNumber","0x0"),16)
-            else:
-                bn = int(bn)
-            if bn:
-                r3 = requests.get("https://api.etherscan.io/api", params={
-                    "module":"block","action":"getblockreward",
-                    "blockno":bn,"apikey":ETHERSCAN_API_KEY}, timeout=8)
-                ts = r3.json().get("result",{}).get("timeStamp")
-                if ts: return int(ts)
-        # Fallback: first tx
+                        "module":"block","action":"getblockreward",
+                        "blockno":block_num,"apikey":ETHERSCAN_API_KEY}, timeout=8)
+                    ts = r2.json().get("result",{}).get("timeStamp")
+                    if ts: return int(ts)
+        except Exception as e:
+            logger.debug(f"Etherscan logs {pair_address}: {e}")
+
+    # 5) First tx on token contract (original fallback)
+    try:
         r4 = requests.get("https://api.etherscan.io/api", params={
             "module":"account","action":"txlist","address":addr,
             "startblock":0,"endblock":99999999,"page":1,"offset":1,
@@ -165,26 +255,42 @@ def get_socials(addr):
     except:
         return {}
 
-def get_ath_and_dex(pair):
-    """Returns (ath_mc_str, dex_version_str) from GeckoTerminal."""
+def get_pool_meta(pair):
+    """Returns (ath_mc_str, dex_name_str, pool_created_at_iso) using:
+    1. On-chain factory() call (most reliable for DEX)
+    2. GeckoTerminal pool data (dex relationship + pool_created_at)
+    3. GeckoTerminal OHLCV (ATH)
+    """
     pa = pair.get("pairAddress","")
     ath_str = "N/A"
-    dex_ver = None
+    onchain_dex = None
+    gt_dex = None
+    gt_created = None
 
-    # Get pool info for dex version
+    # 1) On-chain factory detection (ground truth)
+    if pa:
+        onchain_dex = detect_dex_onchain(pa)
+
+    # 2) GeckoTerminal pool info — dex relationship + pool_created_at
     if pa:
         try:
             r1 = requests.get(f"https://api.geckoterminal.com/api/v2/networks/eth/pools/{pa}",
                 headers={"Accept":"application/json;version=20230302"}, timeout=6)
             r1.raise_for_status()
             pool_data = r1.json().get("data",{})
+            # DEX from GT
             dex_id = pool_data.get("relationships",{}).get("dex",{}).get("data",{}).get("id","")
             if dex_id:
-                dex_ver = dex_id
+                gt_dex = dex_id
+            # Pool creation timestamp from GT
+            attrs = pool_data.get("attributes",{})
+            pca = attrs.get("pool_created_at")
+            if pca:
+                gt_created = pca
         except:
             pass
 
-    # Get ATH from OHLCV
+    # 3) ATH from OHLCV
     try:
         cp = float(pair.get("priceUsd") or 0)
         fdv = float(pair.get("fdv") or 0)
@@ -201,7 +307,10 @@ def get_ath_and_dex(pair):
     except:
         pass
 
-    return ath_str, dex_ver
+    # Resolve final DEX name: on-chain > GT > DexScreener dexId
+    final_dex = dex_name(pair.get("dexId","unknown"), gt_dex, onchain_dex)
+
+    return ath_str, final_dex, gt_created
 
 def get_tax(addr):
     try:
@@ -223,11 +332,12 @@ def get_tax(addr):
 # ─── Core ─────────────────────────────────────────────────────────────────────
 
 def fetch_one(addr, pair):
-    ts        = get_timestamp(addr, pair.get("pairCreatedAt"))
-    info      = get_socials(addr)
-    ath, gdex = get_ath_and_dex(pair)
-    tax       = get_tax(addr)
-    return addr, pair, ts, info, ath, tax, gdex
+    pa = pair.get("pairAddress","")
+    ath, resolved_dex, gt_created = get_pool_meta(pair)
+    ts = get_timestamp(addr, pair.get("pairCreatedAt"), pair_address=pa, gt_created_at=gt_created)
+    info = get_socials(addr)
+    tax  = get_tax(addr)
+    return addr, pair, ts, info, ath, tax, resolved_dex
 
 def find_tokens(name, dex_filter=None):
     with ThreadPoolExecutor(max_workers=2) as p:
@@ -289,12 +399,13 @@ def find_tokens(name, dex_filter=None):
 
 # ─── Message ──────────────────────────────────────────────────────────────────
 
-def build_msg(pair, ts, info, ath, tax, gdex=None):
+def build_msg(pair, ts, info, ath, tax, resolved_dex=None):
     b     = pair.get("baseToken",{})
     name  = b.get("name","Unknown")
     sym   = b.get("symbol","?")
     addr  = b.get("address","")
-    dex   = dex_name(pair.get("dexId","Unknown"), gdex)
+    # resolved_dex is already the final name (on-chain > GT > DexScreener)
+    dex   = resolved_dex or dex_name(pair.get("dexId","Unknown"))
     pa    = pair.get("pairAddress", addr)
     mc    = pair.get("fdv")
     liq   = pair.get("liquidity") or {}
