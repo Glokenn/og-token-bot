@@ -242,8 +242,7 @@ def fetch_one(addr, pair):
     info      = get_socials(addr)
     ath, gdex = get_ath_and_dex(pair)
     tax       = get_tax(addr)
-    lp_st     = get_lp_status(addr)
-    return addr, pair, ts, info, ath, tax, gdex, lp_st
+    return addr, pair, ts, info, ath, tax, gdex
 
 def find_tokens(name, dex_filter=None):
     with ThreadPoolExecutor(max_workers=2) as p:
@@ -296,7 +295,18 @@ def find_tokens(name, dex_filter=None):
             except Exception as e: logger.error(f"Worker: {e}")
 
     results.sort(key=lambda x: x[2] if x[2] else float("inf"))
-    return {"results": results[:MAX_RESULTS], "total": total}, None
+    top = results[:MAX_RESULTS]
+
+    # Call GoPlus ONE BY ONE (not parallel) to avoid IP block
+    import time
+    final = []
+    for r in top:
+        addr = r[0]
+        lp_st = get_lp_status(addr)
+        final.append(r + (lp_st,))
+        time.sleep(0.3)  # small delay between calls
+
+    return {"results": final, "total": total}, None
 
 # ─── Message ──────────────────────────────────────────────────────────────────
 
