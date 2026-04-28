@@ -45,13 +45,15 @@ def age(ts):
     p.append(f"{m}m")
     return " ".join(p) + " ago"
 
-def dex_name(dex_id):
-    d = dex_id.lower()
+def dex_name(dex_id, gt_dex=None):
+    d = (gt_dex or dex_id or "unknown").lower()
     if "v4" in d and "uniswap" in d: return "Uniswap V4"
     if "v3" in d and "uniswap" in d: return "Uniswap V3"
-    if d == "uniswap" or ("v2" in d and "uniswap" in d): return "Uniswap V2"
+    if "v2" in d and "uniswap" in d: return "Uniswap V2"
+    if d == "uniswap":               return "Uniswap V2"
     if "sushiswap" in d:  return "SushiSwap"
     if "pancakeswap" in d: return "PancakeSwap"
+    if d == "unknown":    return "Unknown DEX"
     return d.replace("-"," ").replace("_"," ").title()
 
 def dex_matches_filter(dex_id, filt):
@@ -163,22 +165,43 @@ def get_socials(addr):
     except:
         return {}
 
-def get_ath(pair):
+def get_ath_and_dex(pair):
+    """Returns (ath_mc_str, dex_version_str) from GeckoTerminal."""
+    pa = pair.get("pairAddress","")
+    ath_str = "N/A"
+    dex_ver = None
+
+    # Get pool info for dex version
+    if pa:
+        try:
+            r1 = requests.get(f"https://api.geckoterminal.com/api/v2/networks/eth/pools/{pa}",
+                headers={"Accept":"application/json;version=20230302"}, timeout=6)
+            r1.raise_for_status()
+            pool_data = r1.json().get("data",{})
+            dex_id = pool_data.get("relationships",{}).get("dex",{}).get("data",{}).get("id","")
+            if dex_id:
+                dex_ver = dex_id
+        except:
+            pass
+
+    # Get ATH from OHLCV
     try:
-        pa = pair.get("pairAddress","")
         cp = float(pair.get("priceUsd") or 0)
         fdv = float(pair.get("fdv") or 0)
-        if not pa or not cp or not fdv: return "N/A"
-        r = requests.get(f"https://api.geckoterminal.com/api/v2/networks/eth/pools/{pa}/ohlcv/day",
-            params={"limit":1000,"currency":"usd"},
-            headers={"Accept":"application/json;version=20230302"}, timeout=8)
-        r.raise_for_status()
-        ohlcv = r.json().get("data",{}).get("attributes",{}).get("ohlcv_list",[])
-        if not ohlcv: return "N/A"
-        ath_p = max(e[2] for e in ohlcv)
-        return fmt((ath_p/cp)*fdv) if ath_p and cp > 0 else "N/A"
+        if pa and cp and fdv:
+            r2 = requests.get(f"https://api.geckoterminal.com/api/v2/networks/eth/pools/{pa}/ohlcv/day",
+                params={"limit":1000,"currency":"usd"},
+                headers={"Accept":"application/json;version=20230302"}, timeout=8)
+            r2.raise_for_status()
+            ohlcv = r2.json().get("data",{}).get("attributes",{}).get("ohlcv_list",[])
+            if ohlcv:
+                ath_p = max(e[2] for e in ohlcv)
+                if ath_p and cp > 0:
+                    ath_str = fmt((ath_p/cp)*fdv)
     except:
-        return "N/A"
+        pass
+
+    return ath_str, dex_ver
 
 def get_tax(addr):
     try:
@@ -200,11 +223,11 @@ def get_tax(addr):
 # ─── Core ─────────────────────────────────────────────────────────────────────
 
 def fetch_one(addr, pair):
-    ts   = get_timestamp(addr, pair.get("pairCreatedAt"))
-    info = get_socials(addr)
-    ath  = get_ath(pair)
-    tax  = get_tax(addr)
-    return addr, pair, ts, info, ath, tax
+    ts        = get_timestamp(addr, pair.get("pairCreatedAt"))
+    info      = get_socials(addr)
+    ath, gdex = get_ath_and_dex(pair)
+    tax       = get_tax(addr)
+    return addr, pair, ts, info, ath, tax, gdex
 
 def find_tokens(name, dex_filter=None):
     with ThreadPoolExecutor(max_workers=2) as p:
@@ -227,7 +250,7 @@ def find_tokens(name, dex_filter=None):
             extra = [p for p in (r2.json().get("pairs") or [])
                      if p.get("chainId","").lower() == "ethereum"
                      and (p.get("baseToken",{}).get("symbol","").lower() == nl
-                          or nl in p.get("baseToken",{}).get("name","").lower())]
+                          or p.get("baseToken",{}).get("name","").lower() == nl)]
             ds.extend(extra)
         except:
             pass
@@ -266,12 +289,12 @@ def find_tokens(name, dex_filter=None):
 
 # ─── Message ──────────────────────────────────────────────────────────────────
 
-def build_msg(pair, ts, info, ath, tax):
+def build_msg(pair, ts, info, ath, tax, gdex=None):
     b     = pair.get("baseToken",{})
     name  = b.get("name","Unknown")
     sym   = b.get("symbol","?")
     addr  = b.get("address","")
-    dex   = dex_name(pair.get("dexId","Unknown"))
+    dex   = dex_name(pair.get("dexId","Unknown"), gdex)
     pa    = pair.get("pairAddress", addr)
     mc    = pair.get("fdv")
     liq   = pair.get("liquidity") or {}
@@ -345,7 +368,7 @@ async def eth_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await loading.edit_text(err, parse_mode=ParseMode.MARKDOWN)
             return
         res = data["results"]; tot = data["total"]
-        blocks = [build_msg(pair, ts, info, ath, tax) for _, pair, ts, info, ath, tax in res]
+        blocks = [build_msg(pair, ts, info, ath, tax, gdex) for _, pair, ts, info, ath, tax, gdex in res]
         sep = "\n➖➖➖➖➖➖➖➖➖➖\n"
         await loading.edit_text(sep.join(blocks) + f"\n\n📊 Showing {len(res)}/{tot} results",
             parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
