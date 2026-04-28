@@ -324,7 +324,7 @@ def find_tokens(name, dex_filter=None):
 
 # ─── Message ──────────────────────────────────────────────────────────────────
 
-def build_msg(pair, ts, info, ath, tax, gdex=None, lp="N/A"):
+def build_msg(pair, ts, info, ath, tax, gdex=None, lp_status="N/A"):
     b     = pair.get("baseToken",{})
     name  = b.get("name","Unknown")
     sym   = b.get("symbol","?")
@@ -350,7 +350,7 @@ def build_msg(pair, ts, info, ath, tax, gdex=None, lp="N/A"):
         if u: sp.append(f'🌐 [{(w.get("label") or "Website").title()}]({u})')
     soc = " | ".join(sp) if sp else "No socials available"
     tl = "🚨 *HONEYPOT — DO NOT BUY*" if tax == "HONEYPOT" else f"💸 Tax: {tax}"
-    lp_line = f"🔥 LP: {lp}"
+    lp_line = f"🔥 LP: {lp_status}"
     return (
         f"✅ *{name}* ({sym}) ⏳ {age(ts)}  📡\n"
         f"`{addr}`\n\n"
@@ -405,7 +405,7 @@ async def eth_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await loading.edit_text(err, parse_mode=ParseMode.MARKDOWN)
             return
         res = data["results"]; tot = data["total"]
-        blocks = [build_msg(pair, ts, info, ath, tax, gdex, lp) for _, pair, ts, info, ath, tax, gdex, lp in res]
+        blocks = [build_msg(pair, ts, info, ath, tax, gdex, lp_status) for _, pair, ts, info, ath, tax, gdex, lp_status in res]
         sep = "\n➖➖➖➖➖➖➖➖➖➖\n"
         await loading.edit_text(sep.join(blocks) + f"\n\n📊 Showing {len(res)}/{tot} results",
             parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
