@@ -160,57 +160,62 @@ def search_geckoterminal(name):
 
 # ─── Data fetchers ────────────────────────────────────────────────────────────
 
+def _etherscan_block_ts(block_num):
+    """Get block timestamp from Etherscan. Used everywhere to stay on one clock."""
+    try:
+        r = requests.get("https://api.etherscan.io/api", params={
+            "module":"block","action":"getblockreward",
+            "blockno":block_num,"apikey":ETHERSCAN_API_KEY}, timeout=8)
+        ts = r.json().get("result",{}).get("timeStamp")
+        if ts: return int(ts)
+    except:
+        pass
+    return None
+
+def _etherscan_contract_creation(address):
+    """Get creation block number for a contract address."""
+    try:
+        r = requests.get("https://api.etherscan.io/api", params={
+            "module":"contract","action":"getcontractcreation",
+            "contractaddresses":address,"apikey":ETHERSCAN_API_KEY}, timeout=8)
+        d = r.json()
+        if d.get("status")=="1" and d.get("result"):
+            res = d["result"][0]
+            bn = res.get("blockNumber")
+            if not bn:
+                txh = res.get("txHash")
+                if txh:
+                    r2 = requests.get("https://api.etherscan.io/api", params={
+                        "module":"proxy","action":"eth_getTransactionByHash",
+                        "txhash":txh,"apikey":ETHERSCAN_API_KEY}, timeout=8)
+                    bn = int(r2.json().get("result",{}).get("blockNumber","0x0"),16)
+            else:
+                bn = int(bn)
+            if bn:
+                return _etherscan_block_ts(bn)
+    except Exception as e:
+        logger.debug(f"Etherscan contract creation {address}: {e}")
+    return None
+
 def get_timestamp(addr, pair_created_ms, pair_address=None, gt_created_at=None):
-    """Resolve pair creation time. Priority:
-    1. DexScreener pairCreatedAt
-    2. GeckoTerminal pool_created_at
-    3. Etherscan contract creation
-    4. Etherscan first event log on the pair
-    5. Etherscan first tx on the token contract
+    """Resolve pair creation time.
+    ALWAYS use Etherscan (same clock) first to keep sort order accurate.
+    DexScreener/GeckoTerminal are last-resort only.
+
+    Priority:
+    1. Etherscan: pair contract creation (most accurate)
+    2. Etherscan: first event log on pair (catches internal-tx deploys)
+    3. Etherscan: token contract creation
+    4. Etherscan: first tx on token
+    5. DexScreener pairCreatedAt (different clock — fallback only)
+    6. GeckoTerminal pool_created_at (different clock — fallback only)
     """
-    # 1) DexScreener
-    if pair_created_ms:
-        return int(pair_created_ms) // 1000
+    # 1) Etherscan pair contract creation — ground truth, same clock for all
+    if pair_address:
+        ts = _etherscan_contract_creation(pair_address)
+        if ts: return ts
 
-    # 2) GeckoTerminal pool_created_at (ISO string from pool endpoint)
-    if gt_created_at:
-        try:
-            dt = datetime.fromisoformat(gt_created_at.replace("Z", "+00:00"))
-            return int(dt.timestamp())
-        except:
-            pass
-
-    # 3) Etherscan contract creation (for the PAIR address first, then token)
-    for target in ([pair_address, addr] if pair_address else [addr]):
-        if not target:
-            continue
-        try:
-            r = requests.get("https://api.etherscan.io/api", params={
-                "module":"contract","action":"getcontractcreation",
-                "contractaddresses":target,"apikey":ETHERSCAN_API_KEY}, timeout=8)
-            d = r.json()
-            if d.get("status")=="1" and d.get("result"):
-                res = d["result"][0]
-                bn = res.get("blockNumber")
-                if not bn:
-                    txh = res.get("txHash")
-                    if txh:
-                        r2 = requests.get("https://api.etherscan.io/api", params={
-                            "module":"proxy","action":"eth_getTransactionByHash",
-                            "txhash":txh,"apikey":ETHERSCAN_API_KEY}, timeout=8)
-                        bn = int(r2.json().get("result",{}).get("blockNumber","0x0"),16)
-                else:
-                    bn = int(bn)
-                if bn:
-                    r3 = requests.get("https://api.etherscan.io/api", params={
-                        "module":"block","action":"getblockreward",
-                        "blockno":bn,"apikey":ETHERSCAN_API_KEY}, timeout=8)
-                    ts = r3.json().get("result",{}).get("timeStamp")
-                    if ts: return int(ts)
-        except Exception as e:
-            logger.debug(f"Etherscan contract creation {target}: {e}")
-
-    # 4) First event log on the pair contract (catches internal-tx deploys)
+    # 2) First event log on pair contract (catches internal-tx deploys)
     if pair_address:
         try:
             r = requests.get("https://api.etherscan.io/api", params={
@@ -224,15 +229,16 @@ def get_timestamp(addr, pair_created_ms, pair_address=None, gt_created_at=None):
                 block_hex = logs[0].get("blockNumber","0x0")
                 block_num = int(block_hex, 16) if block_hex.startswith("0x") else int(block_hex)
                 if block_num:
-                    r2 = requests.get("https://api.etherscan.io/api", params={
-                        "module":"block","action":"getblockreward",
-                        "blockno":block_num,"apikey":ETHERSCAN_API_KEY}, timeout=8)
-                    ts = r2.json().get("result",{}).get("timeStamp")
-                    if ts: return int(ts)
+                    ts = _etherscan_block_ts(block_num)
+                    if ts: return ts
         except Exception as e:
             logger.debug(f"Etherscan logs {pair_address}: {e}")
 
-    # 5) First tx on token contract (original fallback)
+    # 3) Etherscan token contract creation
+    ts = _etherscan_contract_creation(addr)
+    if ts: return ts
+
+    # 4) First tx on token contract
     try:
         r4 = requests.get("https://api.etherscan.io/api", params={
             "module":"account","action":"txlist","address":addr,
@@ -240,10 +246,23 @@ def get_timestamp(addr, pair_created_ms, pair_address=None, gt_created_at=None):
             "sort":"asc","apikey":ETHERSCAN_API_KEY}, timeout=8)
         txs = r4.json().get("result") or []
         if isinstance(txs, list) and txs:
-            ts = txs[0].get("timeStamp")
-            if ts: return int(ts)
+            ts_val = txs[0].get("timeStamp")
+            if ts_val: return int(ts_val)
     except Exception as e:
         logger.error(f"Etherscan ts {addr}: {e}")
+
+    # 5) DexScreener (different clock — last resort)
+    if pair_created_ms:
+        return int(pair_created_ms) // 1000
+
+    # 6) GeckoTerminal (different clock — last resort)
+    if gt_created_at:
+        try:
+            dt = datetime.fromisoformat(gt_created_at.replace("Z", "+00:00"))
+            return int(dt.timestamp())
+        except:
+            pass
+
     return None
 
 def get_socials(addr):
@@ -402,7 +421,7 @@ def find_tokens(name, dex_filter=None):
 def build_msg(pair, ts, info, ath, tax, resolved_dex=None):
     b     = pair.get("baseToken",{})
     name  = b.get("name","Unknown")
-    sym   = b.get("symbol","?")
+    sym   = b.get("symbol","") or ""
     addr  = b.get("address","")
     # resolved_dex is already the final name (on-chain > GT > DexScreener)
     dex   = resolved_dex or dex_name(pair.get("dexId","Unknown"))
@@ -427,7 +446,7 @@ def build_msg(pair, ts, info, ath, tax, resolved_dex=None):
     soc = " | ".join(sp) if sp else "No socials available"
     tl = "🚨 *HONEYPOT — DO NOT BUY*" if tax == "HONEYPOT" else f"💸 Tax: {tax}"
     return (
-        f"✅ *{name}* ({sym}) ⏳ {age(ts)}  📡\n"
+        f"✅ *{name}*{f' ({sym})' if sym else ''} ⏳ {age(ts)}  📡\n"
         f"`{addr}`\n\n"
         f"💰 MC: {fmt(mc)} | 🚀 ATH MC: {ath} | 🏦 LP: {lp} | 🏷️ {dex}\n"
         f"📊 Tx 24h: {tx.get('buys',0)}B/{tx.get('sells',0)}S | 🔊 Vol 5m: {fmt(vol.get('m5'))}\n"
