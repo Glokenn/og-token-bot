@@ -413,7 +413,17 @@ def find_tokens(name, dex_filter=None):
             try: results.append(f.result())
             except Exception as e: logger.error(f"Worker: {e}")
 
+    # Post-filter by RESOLVED dex name (on-chain truth, not API label)
+    if dex_filter:
+        vmap = {"v2": "V2", "v3": "V3", "v4": "V4"}
+        vtag = vmap.get(dex_filter, "")
+        results = [r for r in results if vtag in (r[6] or "")]
+
+    if not results:
+        return None, f"No *{name}* pairs found on Uniswap {dex_filter.upper()}."
+
     results.sort(key=lambda x: x[2] if x[2] else float("inf"))
+    total = len(results)
     return {"results": results[:MAX_RESULTS], "total": total}, None
 
 # ─── Message ──────────────────────────────────────────────────────────────────
